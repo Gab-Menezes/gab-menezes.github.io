@@ -98,7 +98,7 @@ So we reuse the work done the previous step, just connect the right term with th
 
 The main idea to recreate and optimize this behaviour was taken from [`Roaring Bitmaps`](https://roaringbitmap.org/), that's why it's called `Roaringish`. We want to pack as much data as possible and avoid storing the positions for each document for each term separatly.
 
-Assuming that the $$pos \le 2^{16}*16 = 1048576$$ (i.e the maximum document length is 1048576 tokens which is very reasonable) we can decompose this value into two 16 bits, one representing the group and other the value, where $$pos = group * 16 + value$$
+Assuming that the $$pos \le 2^{16}*16 = 1048576$$ (i.e the maximum document length is 1048576 tokens which is very reasonable, it's way more than [Meilisearch for example](https://www.meilisearch.com/docs/learn/resources/known_limitations#maximum-number-of-words-per-attribute), so this should be fine) allows us to decompose this value into two 16 bits, one representing the group and other the value, where $$pos = group * 16 + value$$
 
 ```python
 posns  =              [1, 5, 20, 21, 31, 100, 340]
@@ -240,3 +240,5 @@ As I said very naive and very simple, but I hope you can look at this 7 steps an
 * ...
 
 So we have a lot to work with, but even with all of this the query times (IIRC: the worst ones took around hundreds of milliseconds) were decent enough to make me wanna continue the project (ohh sweet me, only if I had stopped here).
+
+**Note**: A big shoutout for this two amazing pieces of technolgies that allowed me to build my reverse index, even though it changed a lot through out the versions [LMDB](http://www.lmdb.tech/doc/) ([Heed](https://github.com/meilisearch/heed)) and [rkyv](https://github.com/rkyv/rkyv) were the heart and soul of it in every iteration.
