@@ -17,7 +17,7 @@ title: "Using the most unhinged AVX512 instruction to make the fastest phrase se
   * I ran each query 20 times to warmup the CPU, after that I ran the same query another 1000 times and collected the time taken as a whole and in each crucial step, with this we have time/iter.
   * For those who say that that's not a good benchmark and I should have used criterion with statistical analysis and blah blah blah... All I can say is both of my system (spoiler alert) are pretty reproducible (up to 5 us on the whole benchmark, not per iter, per benchmark run !!!) if I run the same benchmark twice. So this is good enough.
   * So after the CPU is warm the time in each iteration is pretty damn consistent, so that's why I consider this good enough.
-  * The dataset used is the same used by Doug, [MS MARCO](https://microsoft.github.io/msmarco/), containing 3.2M documents, around 22GB of data. It consists of a link, question and a long answer, in this case we only index the answer (so 20/22GB of data). 
+  * The dataset used is the same used by Doug, [MS MARCO](https://microsoft.github.io/msmarco/), containing 3.2M documents, around 22GB of data. It consists of a link, question and a long answer, in this case we only index the answer (so 20/22GB of data) (in the original article only 1M documents were used, but in here we ingest all of it). 
   * Getting close to the end there will be some benchmarks and to finalize there will be a comparision against [Meilisearch](https://www.meilisearch.com/) (production ready Search Engine, who is known for it's good performance)
 * Also a huge thanks to all of the people who helped me through this, specially the super kind people on the [Gamozo's discord](https://discord.gg/gwfvzzQC), how through the last year had to see me go crazy about intersection algos.
 * **Why am I doing this ?** Because I like it and wanted to nerd snipe some people.
@@ -161,4 +161,82 @@ Group 0                            Group 1
 * The maximum distance between tokens is 1 at the moment, that's why we shift left by 1. But there is the concept of `slop` where you want the token: $$t_0$$ to be a distance $$N$$ of token $$t_1$$.
 
 # Where my journey began
-After reading this genius idea I had to implement this in Rust, specially because the original version was implemented in Python, so of course there was performance being left on the table.
+After reading this genius idea I had to implement it in Rust, specially because the original version was implemented in Python, so of course there was performance being left on the table.
+
+## A child is born
+Just like when a baby is born, this version was naive, nothing fancy or smart going on, just the bare minimum to get things working. But a few concepts that we will establish here will stay with us for the rest of our life (like a personality).
+
+I didn't look on how Doug implemented his version, I went completly blind, so I kinda just followed the blog post, in there each computationally expensive part is done in separate step, so that's what I did.
+
+First my reverse index representation was the following:
+```rust
+struct Roaringish {
+    inner: Vec<u32>,
+}
+struct PostingsList {
+    doc_ids: Vec<u32>,
+    positions: Vec<Roaringish>,
+    len_sum: u64
+}
+struct RoaringishPacked {
+    doc_id_groups: Box<[u64]>,
+    positions: Box<[u16]>,
+}
+```
+
+`PostingsList` was saved on disk with the fields `doc_ids` and `positions` having the same length, and during search time the `postings list` object would be used to create `RoaringishPacked` (again super naive stuff, later this will change radically) (this is obviously bad, we are spending extra time during search, also poor memory usage/layout...).
+
+And for the intersection the first algo I implemented was the exact same Doug proposed in his [second article](https://softwaredoug.com/blog/2024/05/05/faster-intersect), a Gallop Intersection.
+
+```rust
+while lhs_i < lhs.len() && rhs_i < rhs.len() {
+    let mut lhs_delta = 1;
+    let mut rhs_delta = 1;
+
+    while lhs_i < lhs.len() && lhs[lhs_i] < rhs[rhs_i] {
+        lhs_i += lhs_delta;
+        lhs_delta *= 2;
+    }
+    lhs_i -= lhs_delta / 2;
+
+    while rhs_i < rhs.len() && rhs[rhs_i] < lhs[lhs_i] {
+        rhs_i += rhs_delta;
+        rhs_delta *= 2;
+    }
+    rhs_i -= rhs_delta / 2;
+
+    let lhs = lhs[lhs_i];
+    let rhs = rhs[rhs_i];
+    match lhs.cmp(rhs) {
+        std::cmp::Ordering::Less => lhs_i += 1,
+        std::cmp::Ordering::Greater => rhs_i += 1,
+        std::cmp::Ordering::Equal => {
+            // ...
+            lhs_i += 1;
+            rhs_i += 1;
+        },
+    }
+}
+```
+
+To solve one of the problems discussed earlier, my intersections are done in two phases. First phase is concerned with values in the same group and the second phase with values that would cross the group boundry. This is done with a const generic boolean flag.
+
+**Note**: Through out development I changed how this two phases work, but the main idea still the same until the current version.
+
+So here is how this first version worked:
+1. First phase: Intersect `lhs` and `rhs` `doc_id_groups`, if they are in the intersection write to a temporary buffer the `lhs_values` and `rhs_values`
+2. Before the second phase add one to the group of all `doc_id_groups` in `lhs`
+3. Second phase: Intersect but in this case we only write if the MSB is set in the `lhs_values`
+4. Since `lhs_values.len() == rhs_values.len()` zip this two, and calculate the values intersect, `(lhs_value << 1) & rhs_value`.
+5. Since we know all values in `msb_lhs_values` have the MSB set, we loop over all values in `msb_rhs_values` and calculate `rhs_value & 1`.
+6. After this we merge this two into the final result
+7. Repeat this for each token
+
+As I said very naive and very simple, but I hope you can look at this 7 steps and see who poorly optimized this is.
+* We are doing more than two big loops with step `4.` and `5.`. This is why Big O lies to you, in the end this is the same Big O if we eliminate `4.` and `5.`, but doing them is horrible for perf.
+* Also we are doing a lot of memory allocations.
+* Poorly optimized code in general.
+* Having to build `RoaringishPacked` during search time is bad.
+* ...
+
+So we have a lot to work with, but even with all of this the query times (IIRC: the worst ones took around hundreds of milliseconds) were decent enough to make me wanna continue the project (ohh sweet me, only if I had stopped here).
