@@ -6,9 +6,9 @@ title: "Using the most unhinged AVX512 instruction to make the fastest phrase se
 # Disclaimers before we start
 * The contents of this blog post are inspired by the wonderful idea of [Doug Turbull](https://softwaredoug.com/) from the series of blog posts about [Roaringish](https://softwaredoug.com/blog/2024/01/21/search-array-phrase-algorithm). In here we will take this ideas to an extreme, from smart algos to raw performance optimization.
 * I highly recommend reading the [Roaringish](https://softwaredoug.com/blog/2024/01/21/search-array-phrase-algorithm) blog post, but if you don't want there will be a recap on how it works.
-* This project it's been almost 7 months in the making. At the beginning I wasn't planning on writing a blog post about it, so that's why the structure of this post will be a little bit different. I will go through all major changes in my git history explaning how and why this impacted the performance (sometimes we will go deep and others will be a brief overview). And since there is a lot of things to go through (and I wasn't planning on writing this...) there will be no benchmarks on this older changes, but I can ensure you everything was throughly benchmarked, before being commited to the repo. (This will be a long blog post...)
+* This project it's been almost 7 months in the making. At the beginning I wasn't planning on writing a blog post about it, so that's why the structure of this post will be a little bit different. I will go through all major changes in my git history explaning how and why this impacted the performance (sometimes we will go deep and others will be a brief overview). And since there is a lot of things to go through (and I wasn't planning on writing this...) there will be no benchmarks on the older changes, but I can ensure you everything was throughly benchmarked before being commited to the repo. (This will be a long blog post...)
 * **We won't talk about**:
-  * Multi threading, since this workload is trivially parallelizable (by sharding) it's kinda a easy optimization that anyone can do.
+  * Multi threading, since this workload is trivially parallelizable (by sharding) it's kinda a easy to do it, and it's scales pretty much linearly, so if you are curious on who this would perform on $$X$$ amount of threads, just get the numbers and devide by $$X$$.
   * Things outside my code to make it faster, like enabling Huge Pages.
   * The main focus will be in the search part, so there will be no focus in the indexing part, only when needed
 * **Benchmark methodology**:
@@ -37,7 +37,7 @@ So this makes phrase search way more computationally expensive, the convetional 
 
 This algo (taken from Information Retrieval: Implementing and Evaluating Search Engines) analyzes one document at the time, so the `nextPhrase` function needs to called for each document in the intersection of document ids in the index.
 
-Description (also taken from the book): Locates the first occurrence of a phrase after a given position. The function call the `next(t, i)` method returns next position `t` after the position i. Similar to `prev(t, i)`.
+Description (also taken from the book): Locates the first occurrence of a phrase after a given position. The function calls the `next(t, i)` method which returns next position `t` after the position i. Similar to `prev(t, i)`.
 
 You don't need to understand this algo, just that is inefficient because of a lot of reasons:
   * Intersection is expensive
@@ -88,7 +88,7 @@ lamb:
 ...
 ```
 
-To do a phrase search we can connect two terms at the time, the left and right one, previoud one, i.g searching by "mary had a little lamb", will result in searching by:
+To do a phrase search we can connect two terms at the time, the left and right one. Searching by "mary had a little lamb", will result in searching by:
 
 * `"mary"` and `"had"` = `"mary had"`
 * `"mary had"` and `"a"` = `"mary had a"`
@@ -229,8 +229,8 @@ So here is how this first version worked:
 3. Second phase: Intersect but in this case we only write if the MSB is set in the `lhs_values`
 4. Since `lhs_values.len() == rhs_values.len()` zip this two, and calculate the values intersect, `(lhs_value << 1) & rhs_value`.
 5. Since we know all values in `msb_lhs_values` have the MSB set, we loop over all values in `msb_rhs_values` and calculate `rhs_value & 1`.
-6. After this we merge this two into the final result
-7. Repeat this for each token
+6. After this we merge this two into the final result.
+7. Repeat this for each token.
 
 As I said very naive and very simple, but I hope you can look at this 7 steps and see who poorly optimized this is.
 * We are doing more than two big loops with step `4.` and `5.`. This is why Big O lies to you, in the end this is the same Big O if we eliminate `4.` and `5.`, but doing them is horrible for perf.
@@ -241,4 +241,4 @@ As I said very naive and very simple, but I hope you can look at this 7 steps an
 
 So we have a lot to work with, but even with all of this the query times (IIRC: the worst ones took around hundreds of milliseconds) were decent enough to make me wanna continue the project (ohh sweet me, only if I had stopped here).
 
-**Note**: A big shoutout for this two amazing pieces of technolgies that allowed me to build my reverse index, even though it changed a lot through out the versions [LMDB](http://www.lmdb.tech/doc/) ([Heed](https://github.com/meilisearch/heed)) and [rkyv](https://github.com/rkyv/rkyv) were the heart and soul of it in every iteration.
+**Note**: A big shoutout for this two amazing pieces of technolgies that allowed me to build my reverse index, even though it changed a lot through out the versions. [LMDB](http://www.lmdb.tech/doc/) ([Heed](https://github.com/meilisearch/heed)) and [rkyv](https://github.com/rkyv/rkyv) were the heart and soul of it in every iteration.
