@@ -6,7 +6,7 @@ title: "Using the most unhinged AVX512 instruction to make the fastest phrase se
 # Disclaimers before we start
 * The contents of this blog post are inspired by the wonderful idea of [Doug Turbull](https://softwaredoug.com/) from the series of blog posts about [Roaringish](https://softwaredoug.com/blog/2024/01/21/search-array-phrase-algorithm). In here we will take this ideas to an extreme, from smart algos to raw performance optimization.
 * I highly recommend reading the [Roaringish](https://softwaredoug.com/blog/2024/01/21/search-array-phrase-algorithm) blog post, but if you don't want there will be a recap on how it works.
-* This project it's been almost 7 months in the making, thousands and thousands of line of code have been written an rewritten, so bare with me if I sound crazy. At the moment of writing there is almost 2.7k LOC, but I have commited around 17k LOC (let's take a few thousands because of `.lock` files) (probably at the time of publishing this number has increased), so the project has be rewritten almost 6 times.
+* This project it's been almost 7 months in the making, thousands and thousands of line of code have been written an rewritten, so bear with me if I sound crazy. At the moment of writing there is almost 2.7k LOC, but I have commited around 17k LOC (let's take a few thousands because of `.lock` files) (probably at the time of publishing this number has increased), so the project has be rewritten almost 6 times.
 
 ![](/assets/2025-01-13-using-the-most-unhinged-avx512-instruction-to-make-the-fastest-phrase-search-algo/loc.png)
 
@@ -295,7 +295,8 @@ pub fn search<I: Intersect>(
 }
 ```
 {% enddetails %}
-<br/> 
+<br/>
+
 So you might have noticed that the intersection is composed of two phases, why is that ? There is an annoying issue with Roaringish is due to the edge case where value bits are in the boundry of the group and calculating the intersection would lead to an incorrect result (that's the issue mentioned above). For example:
 ```
 t_0: Group 0                            t_1: Group 1
@@ -715,3 +716,212 @@ This changes made this procedure way, way faster. Where it's not the main bottle
 
 # You are just as good as your reverse index
 No optimization will save you from having a poor reverse index implementation, so just like when you go to the gym and want to skip leg day, don't skip in the technologies and structure of your index.
+
+My reverse index as any other part has gone through dramastic changes during development (that's why having a low index time is good). But there are two pieces of technologies that were the heart and soul in every version: [heed](https://github.com/meilisearch/heed) ([LMDB](http://www.lmdb.tech/doc/)) and [rkyv](https://github.com/rkyv/rkyv). But a special shoutout for the creator of rkyv ([David Koloski](https://github.com/djkoloski)), a super helpful person that released the 0.8.X version that allowed me to use the unaligned feature and is super active on their discord helping people by answering questions and fixing bugs in minutes when they are reported.
+
+Now let's go through the structure of my reverse index, we have 3 databases, that's it. Simple and effective. The first database holds some metadata about the index, the other holds the internal document id to the document it self and the third hold the token to the Roaringish Packed (continous block of memory of `u64`s (`u32` for the doc id, `u16` for the index and `u16` for the values as discussed up above)).
+
+Let's take a look at the signature of the `index` function:
+```rust
+pub fn index<S, D, I>(&self, docs: I, path: &Path, db_size: usize) -> u32
+where
+    S: AsRef<str>,
+    I: IntoIterator<Item = (S, D)>,
+    D: for<'a> Serialize<HighSerializer<AlignedVec, ArenaHandle<'a>, rkyv::rancor::Error>>
+        + Archive
+        + 'static
+{}
+```
+
+What is importante is the type of `docs` which is an iterator that basically returns a tuple `(&str, D)` where the first is the content of the document and `D` (as long as `D` is serializable by rkyv) is the stored version of the document. So this two can be different and that's cool and you might ask why ?
+
+Imagine the scenario where you want to index a bunch of text documents that are in your hard drive, but want to save disk space, so instead of saving the content of the documents in the db when you call the `index` function, passing the content the document and the path of the document as the type `D`, this way you just save the path of the file that has the specified content.
+
+This is just one example, imagine if you have things stored in a external db and just need to save the id...
+
+So remember a few paragraphs above where I said that the third database saves the token to the Roaringish Packed ? I kinda lied to you, sorry... In reality we have an extra moving part, but not because I want, but I couldn't figure it out how to make heed behave the way I want.
+
+For the special souce of this blog post (we will get there in the future, bear with me) I need that the continous block that represents the Roaringish Packed to be aligned to a 64 byte boundry, but you can't enforce this with LMDB and consequently heed. I really tried, but when you insert things into the DB f* the alignment of the rest of the values, so it doesn't work trying to insert things already aligned.
+
+Fixing this isn't hard if we add an additional big file that has all of the Roaringish Packed aligned to 64 byte boundry. So in the LMDB it self we only store a offset and length. But how we align the data ?
+
+This file will be [mmaped](https://man7.org/linux/man-pages/man2/mmap.2.html), so it's guarantee to be page aligned (4k), with this we know the alignment of the base of the file when constructing it, so we just pad some bytes before the begining of the next Roaringish Packed if needed. Easy right ?
+
+Also another small optimization that I thought it would make a bigger difference is to [madivese](https://man7.org/linux/man-pages/man2/madvise.2.html) the retrieved range as sequential read.
+
+{% details **Code** for retrieving the Roaringish Packed from the index **(you can ignore if you want)** %}
+```rust
+fn get_roaringish_packed<'a>(
+    &self,
+    rotxn: &RoTxn,
+    token: &str,
+    mmap: &'a Mmap,
+) -> Option<BorrowRoaringishPacked<'a, Aligned>> {
+    let offset = self.db_token_to_offsets.get(rotxn, token).unwrap()?;
+    Self::get_roaringish_packed_from_offset(offset, mmap)
+}
+
+fn get_roaringish_packed_from_offset<'a>(
+    offset: &ArchivedOffset,
+    mmap: &'a Mmap,
+) -> Option<BorrowRoaringishPacked<'a, Aligned>> {
+    let begin = offset.begin.to_native() as usize;
+    let len = offset.len.to_native() as usize;
+    let end = begin + len;
+    let (l, packed, r) = unsafe { &mmap[begin..end].align_to::<u64>() };
+    assert!(l.is_empty());
+    assert!(r.is_empty());
+
+    mmap.advise_range(memmap2::Advice::Sequential, begin, len)
+        .unwrap();
+
+    Some(BorrowRoaringishPacked::new_raw(packed))
+}
+```
+{% enddetails %}
+<br/>
+
+You might ask: **Is it safe to align to `u64`** ? And the answer is yes, if the file is properly constructed it should this should be 64 byte aligned which is bigger than the 8 byte alignment needed for `u64`. Also checking if `l` and `r` are empty helps us ensure that everything is working properly.
+
+# We can still be smarter
+At this point we have the merged and minimized tokens with their respectives Roaringish Packed, so in theory we have everything needed to start intersecting them right ? Right, but... If I tell you that we can still try to reduce our search space, by doing something that I called smart execution.
+
+Similar to the minimize step we can reduce the number of computed intersections, but in this cases we are just changing the order that we compute the intersections. Since this operation is commutative we can compute it in any order and achieve the same result.
+
+But in this case we can't be so aggresive as the minimize step, because the score would be the final size of the intersection (we only have an upper bound) and to know this we need to compute the intersection it self.
+
+With this in mind be can me a little bit more naive, but still be good enough: start intersecting by the pair that leads to the smallest sum of lengths (we could also start by the token that has the smallest Roaringish Packed length and intersect with the smallest adjecent, but I prefer the first option).
+
+```rust
+let final_tokens: Vec<_> = final_tokens.iter().copied().collect();
+
+let mut min = usize::MAX;
+let mut i = usize::MAX;
+for (j, ts) in final_tokens.windows(2).enumerate() {
+    let l0 = token_to_packed.get(&ts[0]).unwrap().len();
+    let l1 = token_to_packed.get(&ts[1]).unwrap().len();
+    let l = l0 + l1;
+    if l <= min {
+        i = j;
+        min = l;
+    }
+}
+
+let lhs = &final_tokens[i];
+let mut lhs_len = lhs.len() as u32;
+let lhs = token_to_packed.get(lhs).unwrap();
+
+let rhs = &final_tokens[i + 1];
+let mut rhs_len = rhs.len() as u32;
+let rhs = token_to_packed.get(rhs).unwrap();
+
+let mut result = lhs.intersect::<I>(*rhs, lhs_len, stats);
+let mut result_borrow = BorrowRoaringishPacked::new(&result);
+
+let mut left_i = i.wrapping_sub(1);
+let mut right_i = i + 2;
+```
+
+Just loop over every adjecent pair and compute the sum of the lengths and use the smallest as the starting point. After this we intersect with the left or right token depeding which has the smallest size.
+
+```rust
+loop {
+    let lhs = final_tokens.get(left_i);
+    let rhs = final_tokens.get(right_i);
+    match (lhs, rhs) {
+        (Some(t_lhs), Some(t_rhs)) => {
+            // ...
+        }
+        (Some(t_lhs), None) => {
+            // ...
+        }
+        (None, Some(t_rhs)) => {
+            // ...
+        }
+        (None, None) => break,
+    }
+}
+```
+
+{% details **Code** smart execution as a whole **(you can ignore if you want)** %}
+```rust
+let final_tokens: Vec<_> = final_tokens.iter().copied().collect();
+
+let mut min = usize::MAX;
+let mut i = usize::MAX;
+for (j, ts) in final_tokens.windows(2).enumerate() {
+    let l0 = token_to_packed.get(&ts[0]).unwrap().len();
+    let l1 = token_to_packed.get(&ts[1]).unwrap().len();
+    let l = l0 + l1;
+    if l <= min {
+        i = j;
+        min = l;
+    }
+}
+
+let lhs = &final_tokens[i];
+let mut lhs_len = lhs.len() as u32;
+let lhs = token_to_packed.get(lhs).unwrap();
+
+let rhs = &final_tokens[i + 1];
+let mut rhs_len = rhs.len() as u32;
+let rhs = token_to_packed.get(rhs).unwrap();
+
+let mut result = lhs.intersect::<I>(*rhs, lhs_len, stats);
+let mut result_borrow = BorrowRoaringishPacked::new(&result);
+
+let mut left_i = i.wrapping_sub(1);
+let mut right_i = i + 2;
+
+loop {
+    let lhs = final_tokens.get(left_i);
+    let rhs = final_tokens.get(right_i);
+    match (lhs, rhs) {
+        (Some(t_lhs), Some(t_rhs)) => {
+            let lhs = token_to_packed.get(t_lhs).unwrap();
+            let rhs = token_to_packed.get(t_rhs).unwrap();
+            if lhs.len() <= rhs.len() {
+                lhs_len += t_lhs.len() as u32;
+
+                result = lhs.intersect::<I>(result_borrow, lhs_len, stats);
+                result_borrow = BorrowRoaringishPacked::new(&result);
+
+                left_i = left_i.wrapping_sub(1);
+            } else {
+                result = result_borrow.intersect::<I>(*rhs, rhs_len, stats);
+                result_borrow = BorrowRoaringishPacked::new(&result);
+
+                lhs_len += rhs_len;
+                rhs_len = t_rhs.len() as u32;
+
+                right_i += 1;
+            }
+        }
+        (Some(t_lhs), None) => {
+            let lhs = token_to_packed.get(t_lhs).unwrap();
+            lhs_len += t_lhs.len() as u32;
+
+            result = lhs.intersect::<I>(result_borrow, lhs_len, stats);
+            result_borrow = BorrowRoaringishPacked::new(&result);
+
+            left_i = left_i.wrapping_sub(1);
+        }
+        (None, Some(t_rhs)) => {
+            let rhs = token_to_packed.get(t_rhs).unwrap();
+
+            result = result_borrow.intersect::<I>(*rhs, rhs_len, stats);
+            result_borrow = BorrowRoaringishPacked::new(&result);
+
+            lhs_len += rhs_len;
+            rhs_len = t_rhs.len() as u32;
+
+            right_i += 1;
+        }
+        (None, None) => break,
+    }
+}
+```
+{% enddetails %}
+<br/>
+
+This leads to another huge win, specially for queries that have a super rare token in the middle of it, this cuts the search space by a lot, making every single subsequent intersection faster.
