@@ -711,6 +711,8 @@ The type `RefTokens` is a type that holds a "list of tokens", but it's just a li
 
 And finally we have `RefTokenLinkedList` as the output type, in here we are basically creating a liked list of `RefTokens`s which will represent the final merge of the tokens. If you look closely to this type declaration it accepts `'a` and `'alloc` and that's why using a bump allocator makes things easier, the next reference/pointer of the linked list is of type `Option<&'alloc RefTokenLinkedList<'a, 'alloc>>`. So when someone says to you that is hard to make a linked list in Rust now you know that it's not /s.
 
+I usually go with [AHash](https://github.com/tkaitchuck/ahash) as my hashmap in Rust (and for a long time it was the hashmap used in this function), but this time I decided to experiment [GxHash](https://github.com/ogxd/gxhash) and it was plesantly surprised that it was faster, I will take this easy win.
+
 One other small optimization that we can make is reduce the size of the call graph by checking things before calling the function again.
 
 This changes made this procedure way, way faster. Where it's not the main bottleneck for large queries and probably will never be ever be. We can merge an minimize a query of 1000 tokens in `55us`, so pretty fast.
