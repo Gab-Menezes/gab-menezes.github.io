@@ -411,9 +411,307 @@ This version is very simple, it doesn't do the correct merging of tokens nor has
 
 Let's do an example on how this works, since in here we just merge tokens without caring if they are common or rare, let's assume the following query `t_0 t_1 t_2 t_3 t_4`:
 
-For each call of the function we loop over all possible merges of the remaining tokens. So we get the cost for the token `t_0 t_1 t_2` and call the function recursively for `t_3 t_4` and so on. The call graph would look something like this
+For each call of the function we loop over all possible merges of the remaining tokens. So we get the cost for the token `t_0 t_1 t_2` and call the function recursively for `t_3 t_4` and so on. The call graph would look like this:
 
-```
+![](/assets/2025-01-13-using-the-most-unhinged-avx512-instruction-to-make-the-fastest-phrase-search-algo/callstack.png)
 
-minimize(t_0 t_1 t_2 t_3 t_4)
+As you can see there is a lot of repeated work being done, that's why memoization is needed, also reducing the recursion depth helps. So in the final Rust version I did exacltly that, but trying my best to optimize this, also I needed to respect how the merge of tokens work.
+
+If you are going to read the following code, you can just ignore all of the cosnt generics, they are not important for your understanding...
+
+{% details **Code** for merge and minimize **(you can ignore if you want)** %}
+```rust
+#[derive(Clone, Copy)]
+struct RefTokens<'a> {
+    tokens: &'a str,
+    positions: &'a [(usize, usize)],
+}
+
+impl RefTokens<'_> {
+    fn len(&self) -> usize {
+        self.positions.len()
+    }
+
+    fn tokens(&self) -> &str {
+        let (b, e) = self.range();
+        unsafe { self.tokens.get_unchecked(b..e) }
+    }
+
+    fn split_at(&self, i: usize) -> (Self, Self) {
+        let (l, r) = self.positions.split_at(i);
+        (
+            Self {
+                tokens: self.tokens,
+                positions: l,
+            },
+            Self {
+                tokens: self.tokens,
+                positions: r,
+            },
+        )
+    }
+}
+
+impl Hash for RefTokens<'_> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.tokens().hash(state);
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RefTokenLinkedList<'a, 'alloc> {
+    tokens: RefTokens<'a>,
+    next: Option<&'alloc RefTokenLinkedList<'a, 'alloc>>,
+}
+
+fn merge_and_minimize_tokens<'a, 'b, 'alloc>(
+    &self,
+    rotxn: &RoTxn,
+    tokens: RefTokens<'a>,
+    common_tokens: &HashSet<Box<str>>,
+    mmap: &'b Mmap,
+
+    bump: &'alloc Bump,
+) -> (
+    Option<RefTokenLinkedList<'a, 'alloc>>,
+    GxHashMap<RefTokens<'a>, BorrowRoaringishPacked<'b, Aligned>>,
+) {
+    #[inline(always)]
+    fn check_before_recursion<'a, 'b, 'alloc, D>(
+        me: &DB<D>,
+        rotxn: &RoTxn,
+        tokens: RefTokens<'a>,
+        token_to_packed: &mut GxHashMap<RefTokens<'a>, BorrowRoaringishPacked<'b, Aligned>>,
+        mmap: &'b Mmap,
+        memo_token_to_score_choices: &mut GxHashMap<
+            RefTokens<'a>,
+            (usize, &'alloc RefTokenLinkedList<'a, 'alloc>),
+        >,
+        bump: &'alloc Bump,
+    ) -> Option<usize>
+    where
+        D: for<'c> Serialize<HighSerializer<AlignedVec, ArenaHandle<'c>, rkyv::rancor::Error>>
+            + Archive
+            + 'static,
+    {
+        if tokens.len() != 1 {
+            return None;
+        }
+
+        let score = match token_to_packed.entry(tokens) {
+            Entry::Occupied(e) => e.get().len(),
+            Entry::Vacant(e) => match me.get_roaringish_packed(rotxn, &tokens[0], mmap) {
+                Some(packed) => {
+                    let score = packed.len();
+                    e.insert(packed);
+
+                    let linked_list = bump.alloc(RefTokenLinkedList { tokens, next: None });
+                    memo_token_to_score_choices.insert(tokens, (score, linked_list));
+                    score
+                }
+                None => 0,
+            },
+        };
+        Some(score)
+    }
+
+    fn inner_merge_and_minimize_tokens<'a, 'b, 'c, 'alloc, D>(
+        me: &DB<D>,
+        rotxn: &RoTxn,
+        tokens: RefTokens<'a>,
+        common_tokens: &HashSet<Box<str>>,
+        token_to_packed: &mut GxHashMap<RefTokens<'a>, BorrowRoaringishPacked<'b, Aligned>>,
+        mmap: &'b Mmap,
+        memo_token_to_score_choices: &mut GxHashMap<
+            RefTokens<'a>,
+            (usize, &'alloc RefTokenLinkedList<'a, 'alloc>),
+        >,
+
+        bump: &'alloc Bump,
+    ) -> usize
+    where
+        D: for<'d> Serialize<HighSerializer<AlignedVec, ArenaHandle<'d>, rkyv::rancor::Error>>
+            + Archive
+            + 'static,
+    {
+        const { assert!(MAX_WINDOW_LEN.get() == 3) };
+        let mut final_score = usize::MAX;
+        let mut best_token_choice = None;
+        let mut best_rem_choice = None;
+
+        let mut end = tokens
+            .iter()
+            .skip(1)
+            .take(MAX_WINDOW_LEN.get() - 1)
+            .take_while(|t| common_tokens.contains(*t))
+            .count()
+            + 2;
+        if common_tokens.contains(&tokens[0]) {
+            end += 1;
+        }
+        end = end.min(MAX_WINDOW_LEN.get() + 1).min(tokens.len() + 1);
+
+        for i in (1..end).rev() {
+            let (tokens, rem) = tokens.split_at(i);
+
+            let score = match token_to_packed.entry(tokens) {
+                Entry::Occupied(e) => e.get().len(),
+                Entry::Vacant(e) => {
+                    match me.get_roaringish_packed(rotxn, tokens.tokens(), mmap) {
+                        Some(packed) => {
+                            let score = packed.len();
+                            e.insert(packed);
+                            score
+                        }
+                        None => return 0,
+                    }
+                }
+            };
+
+            let mut rem_score = 0;
+            if !rem.is_empty() {
+                rem_score = match memo_token_to_score_choices.get(&rem) {
+                    Some(r) => r.0,
+                    None => {
+                        match check_before_recursion(
+                            me,
+                            rotxn,
+                            rem,
+                            token_to_packed,
+                            mmap,
+                            memo_token_to_score_choices,
+                            bump,
+                        ) {
+                            Some(score) => score,
+                            None => inner_merge_and_minimize_tokens(
+                                me,
+                                rotxn,
+                                rem,
+                                common_tokens,
+                                token_to_packed,
+                                mmap,
+                                memo_token_to_score_choices,
+                                bump,
+                            ),
+                        }
+                    }
+                };
+                if rem_score == 0 {
+                    return 0;
+                }
+            }
+
+            let calc_score = score + rem_score;
+            if calc_score < final_score {
+                final_score = calc_score;
+
+                best_token_choice = Some(tokens);
+                if let Some((_, rem_choices)) = memo_token_to_score_choices.get(&rem) {
+                    best_rem_choice = Some(*rem_choices);
+                };
+            }
+        }
+
+        let choices = match (best_token_choice, best_rem_choice) {
+            (None, None) => return 0,
+            (None, Some(_)) => return 0,
+            (Some(tokens), None) => bump.alloc(RefTokenLinkedList { tokens, next: None }),
+            (Some(tokens), Some(rem)) => bump.alloc(RefTokenLinkedList {
+                tokens,
+                next: Some(rem),
+            }),
+        };
+
+        memo_token_to_score_choices.insert(tokens, (final_score, choices));
+        final_score
+    }
+
+    if common_tokens.is_empty() {
+        let mut token_to_packed = GxHashMap::with_capacity(tokens.len());
+
+        let (mut rem, token) = tokens.split_at(tokens.len() - 1);
+        match self.get_roaringish_packed(rotxn, token.tokens(), mmap) {
+            Some(packed) => token_to_packed.insert(token, packed),
+            None => return (None, GxHashMap::new()),
+        };
+        let mut r = bump.alloc(RefTokenLinkedList {
+            tokens: token,
+            next: None,
+        });
+
+        let j = rem.len();
+        for _ in 0..j {
+            let (temp_rem, token) = rem.split_at(rem.len() - 1);
+            match self.get_roaringish_packed(rotxn, token.tokens(), mmap) {
+                Some(packed) => token_to_packed.insert(token, packed),
+                None => return (None, GxHashMap::new()),
+            };
+            let temp_r = bump.alloc(RefTokenLinkedList {
+                tokens: token,
+                next: Some(r),
+            });
+            r = temp_r;
+            rem = temp_rem;
+        }
+
+        return (Some(*r), token_to_packed);
+    }
+
+    let len = tokens.reserve_len();
+    let mut memo_token_to_score_choices = GxHashMap::with_capacity(len);
+    let mut token_to_packed = GxHashMap::with_capacity(len);
+
+    let score = match check_before_recursion(
+        self,
+        rotxn,
+        tokens,
+        &mut token_to_packed,
+        mmap,
+        &mut memo_token_to_score_choices,
+        bump,
+    ) {
+        Some(score) => score,
+        None => inner_merge_and_minimize_tokens(
+            self,
+            rotxn,
+            tokens,
+            common_tokens,
+            &mut token_to_packed,
+            mmap,
+            &mut memo_token_to_score_choices,
+            bump,
+        ),
+    };
+
+    if score == 0 {
+        return (None, GxHashMap::new());
+    }
+    match memo_token_to_score_choices.remove(&tokens) {
+        Some((_, choices)) => (Some(*choices), token_to_packed),
+        None => (None, GxHashMap::new()),
+    }
+}
 ```
+{% enddetails %}
+<br/>
+
+This code is kinda long and convoluted (also ugly IMHO), so I will not go through it, but there is a few things I would like to talk about it. For a long time the implementation was much more naive and simple and this was enough for a long time, until the point where other parts became way more optimized and this started being the bottleneck specially for long queries.
+
+So don't optimize things that are not your bottleneck, until they become it.
+
+The input tokens in the original version was a `&[&str]` and the memoization was still done using a `HashMap` and this is bad, since the token sequence is the key of the hashmap. Hashing strings is already slow enough, now hashing multiple strings and combining these hashes is ridiculously slow. I used [flamegraph](https://github.com/flamegraph-rs/flamegraph) to find this bottleneck, also another thing that I noticed was a lot of time was being spent on allocations.
+
+To fix both of this problems I decided to be a little bit smarter, since allocations in this case are all tied to the lifetime of the `merge_and_minimize_tokens` function we can just put everything into a [bump/arena allocator](https://github.com/fitzgen/bumpalo) and free it together when finished.
+
+Also putting things into the same bump allocator allows use to more easily manipulate the lifetimes to our own will. That's why we the `'alloc` lifetime.
+
+The type `RefTokens` is a type that holds a "list of tokens", but it's just a lie, what we hold is the original string and a list of pairs, begin and end index of each token, we can use this to slice the original string and have the "list of tokens", this is helpful because now the hash function can be implemented around this fact, so in the end we are just hashing a single string. The `'a` lifetime is the lifetime of the original query string.
+
+And finally we have `RefTokenLinkedList` as the output type, in here we are basically creating a liked list of `RefTokens`s which will represent the final merge of the tokens. If you look closely to this type declaration it accepts `'a` and `'alloc` and that's why using a bump allocator makes things easier, the next reference/pointer of the linked list is of type `Option<&'alloc RefTokenLinkedList<'a, 'alloc>>`. So when someone says to you that is hard to make a linked list in Rust now you know that it's not /s.
+
+One other small optimization that we can make is reduce the size of the call graph by checking things before calling the function again.
+
+This changes made this procedure way, way faster. Where it's not the main bottleneck for large queries and probably will never be ever be. We can merge an minimize a query of 1000 tokens in `55us`, so pretty fast.
+
+# You are just as good as your reverse index
+No optimization will save you from having a poor reverse index implementation, so just like when you go to the gym and want to skip leg day, don't skip in the technologies and structure of your index.
