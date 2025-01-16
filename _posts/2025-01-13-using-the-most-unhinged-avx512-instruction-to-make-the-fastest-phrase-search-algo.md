@@ -23,9 +23,10 @@ title: "Using the most unhinged AVX512 instruction to make the fastest phrase se
   * I have randomly select a bunch of queries (each with different bottleneck profile) and measured how each change impacted it's performance.
   * I ran each query 20 times to warmup the CPU, after that I ran the same query another 1000 times and collected the time taken as a whole and in each crucial step, with this we have time/iter.
   * For those who say that that's not a good benchmark and I should have used criterion with statistical analysis and blah blah blah... All I can say is both of my system (spoiler alert) are pretty reproducible (up to 5 us on the whole benchmark, not per iter, per benchmark run !!!) if I run the same benchmark twice. So this is good enough.
+  * The core that I run the code in on my `isolcpus` list (the physical and mt part) and I used `taskset` everytime... Nothing else was running on the system while collecting data.
   * So after the CPU is warm the time in each iteration is pretty damn consistent, so that's why I consider this good enough.
   * The dataset used is the same used by Doug, [MS MARCO](https://microsoft.github.io/msmarco/), containing 3.2M documents, around 22GB of data. It consists of a link, question and a long answer, in this case we only index the answer (so 20/22GB of data) (in the original article only 1M documents were used, but in here we ingest all of it). 
-  * Getting close to the end there will be some benchmarks and to finalize there will be a comparision against [Meilisearch](https://www.meilisearch.com/) (production ready Search Engine, who is known for it's good performance).
+  * Getting close to the end there will be some benchmarks and a comparisions against [Meilisearch](https://www.meilisearch.com/) (production ready Search Engine, who is known for it's good performance).
   * Spec of both of my systems where I ran all of the benchmarks:
     * Notebook (where most of developemnt took part): i5-1135G7 - 16GB
     * Desktop (final results on this system): 9700x - 64GB (Spoiler)
@@ -925,3 +926,8 @@ loop {
 <br/>
 
 This leads to another huge win, specially for queries that have a super rare token in the middle of it, this cuts the search space by a lot, making every single subsequent intersection faster.
+
+# Here begins the fun
+Now that the boring stuff is past us, let's start the fun part... Again just as a reminder on how the intersection works: we do two phases of intersection, one for the conventional intersection and other for the bits that would cross the group boundry and in the end we merge this two.
+
+In this section we will take a look at assembly, some cool tools to analyze this assembly, SIMD (AVX512), differences in microarchitecture of AMD and Intel chips, emulation of instructions and a lot more. So again sorry to bother you with all of the previous stuff, but it was important.
