@@ -796,6 +796,8 @@ But in this case we can't be so aggresive as the minimize step, because the scor
 With this in mind be can me a little bit more naive, but still be good enough: start intersecting by the pair that leads to the smallest sum of lengths (we could also start by the token that has the smallest Roaringish Packed length and intersect with the smallest adjecent, but I prefer the first option).
 
 ```rust
+// This collect is almost free when compared with the rest, so don't
+// be bothered by it.
 let final_tokens: Vec<_> = final_tokens.iter().copied().collect();
 
 let mut min = usize::MAX;
@@ -846,8 +848,10 @@ loop {
 }
 ```
 
-{% details **Code** smart execution as a whole **(you can ignore if you want)** %}
+{% details **Code** for smart execution as a whole **(you can ignore if you want)** %}
 ```rust
+// This collect is almost free when compared with the rest, so don't
+// be bothered by it.
 let final_tokens: Vec<_> = final_tokens.iter().copied().collect();
 
 let mut min = usize::MAX;
