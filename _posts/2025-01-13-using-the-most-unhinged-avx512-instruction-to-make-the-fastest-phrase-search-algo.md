@@ -11,7 +11,7 @@ title: "Using the most unhinged AVX512 instruction to make the fastest phrase se
 ![](/assets/2025-01-13-using-the-most-unhinged-avx512-instruction-to-make-the-fastest-phrase-search-algo/loc.png)
 
 * At the beginning I wasn't planning on writing a blog post about it, but I invested so much time and the end result is so cool that I think it's worth a blog post.
-* I started writing a first version but didn't like the direction it was going, so I decided to change it and here we are. So my plan is to show the current state of the project and try my best to remember and to explain why things are the way they are, a lot of benchmarking and fine tuning has been taken place so it's almost impossible for me to remember everything. Maybe in some cases I will go back in time to explain the reason certain optimization was chosen and others I might just explain how it works. This post will probably be long, so grab some water/tea/coffee.
+* I started writing a first version but didn't like the direction it was going, so I decided to change it and here we are. So my plan is to show the current state of the project and try my best to remember and to explain why things are the way they are, a lot of benchmarking and fine tuning was done so it's almost impossible for me to remember everything. Maybe in some cases I will go back in time to explain the reason certain optimization was chosen and others I might just explain how it works. This post will probably be long, so grab some water/tea/coffee.
 * Again every piece of code that you will get to see has been rewritten a lot of times, I didn't magically arrive at the solution.
 * There will be a lot of `unsafe` keywords, don't be afraid of it.
 * **We won't talk about**:
@@ -31,7 +31,7 @@ title: "Using the most unhinged AVX512 instruction to make the fastest phrase se
     * Notebook (where most of developemnt took part): i5-1135G7 - 16GB
     * Desktop (final results on this system): 9700x - 64GB (Spoiler)
 * There will be a lot of source code for those who are intrested, but the unecessary ones will be collapsed, if you are not that intrested you can just skip those.
-* Also a huge thanks to all of the people who helped me through this, specially the super kind people on the [Gamozo's discord](https://discord.gg/gwfvzzQC), how through the last year had to see me go crazy about intersection algos.
+* Also a huge thanks to all of the people who helped me through this, specially the super kind people on the [Gamozo's discord](https://discord.gg/gwfvzzQC), who through the last year had to see me go crazy about intersection algos.
 * **Why am I doing this ?** Because I like it and wanted to nerd snipe some people.
 
 
@@ -192,7 +192,7 @@ pub fn search<I: Intersect>(
     if tokens.len() == 1 {
         return self
             .get_roaringish_packed(&rotxn, tokens.first().unwrap(), mmap)
-            .map(|p| p.get_doc_ids(stats))
+            .map(|p| p.get_doc_ids())
             .unwrap_or_default();
     }
 
@@ -209,7 +209,7 @@ pub fn search<I: Intersect>(
         return token_to_packed
             .get(&final_tokens.tokens)
             .unwrap()
-            .get_doc_ids(stats);
+            .get_doc_ids();
     }
 
     let final_tokens: Vec<_> = final_tokens.iter().copied().collect();
@@ -308,21 +308,21 @@ It's obvious in this example that `t_0` is followed by `t_1`, but the convention
 
 **Note:** I don't know how Doug solved this, I haven't checked the code. But this issue is mentioned in the article.
 
-# Use your index time wisely
+# Use your indexing time wisely
 In the field of Information Retrieval and Databases one way to reduce the search/query time is to pre calculate more during indexing/data ingestion.
 
 One of the techniques that I used very early on in the making of this project is merging tokens during indexing (similar to [n-grams](https://en.wikipedia.org/wiki/N-gram)).
 
-I had a few constraints when implementing this final index size, memory consumption while indexing and indexing time, I wanted to minimize the impact of this feature.
+I had a few constraints when implementing this: final index size, memory consumption while indexing and indexing time, I wanted to minimize all of them.
 
-**Why do I want to minimize the impact ?** For the most time I developed this on a 16GB machine with a few hundred gigabytes left, so I was very constrained in this sense. And for indexing time sice I'm developing I want to iterate fast, so if I need to re-index the whole thing it can't take a long time.
+**Why do I want to minimize those metrics ?** For the most time I developed this on a 16GB machine with a few hundred gigabytes left on disk, so I was very constrained in this sense. And for indexing time sice I'm developing I want to iterate fast, so if I need to re-index the whole thing it can't take a long time.
 
-**Note:** If you look at the source code on Github you will see that my indexing to this day is done on a single thread, the reason is that I can easily achive a high memory consuption on a sinle thread. The reason why it consumes so much memory is that most of the indexing is done and cached on RAM to be as fast as possible, indexing this 3.2M documents only take around 30/35m on a single thread.
+**Note:** If you look at the source code on Github you will see that my indexing to this day is done on a single thread, the reason is that I can easily achive a high memory consuption on a sinle thread. The reason why it consumes so much memory is that most of the indexing is done and cached on RAM to be as fast as possible, indexing this 3.2M documents only takes around 30/35m on a single thread.
 
 ## How to solve this problem ?
 The idea is to only merge common tokens, and you might ask: "what is a common token ?" Well it's simple they are the tokens that appear the most in the collection. You can specify how many of the top tokens to consider as common ones, or as a percentage. I arbitrarily chose the top 50 tokens. There is also a parameter of the maximum sequence length, in this case I used 3.
 
-Increasing this two parameters will make the index size, index memory consumption and indexing time grow, so it's a careful balance. But the more you compute at indexing time the better, if you can afford more go for it.
+Increasing this two parameters will make the index size, indexing memory consumption and indexing time grow, so it's a careful balance. But the more you compute at indexing time the better, if you can afford more go for it.
 
 The good thing about merging common tokens is that they are the most expensive in general to compute the intersection, so removing them makes things a lot faster.
 
@@ -789,7 +789,7 @@ You might ask: **Is it safe to align to `u64`** ? And the answer is yes, if the 
 # We can still be smarter
 At this point we have the merged and minimized tokens with their respectives Roaringish Packed, so in theory we have everything needed to start intersecting them right ? Right, but... If I tell you that we can still try to reduce our search space, by doing something that I called smart execution.
 
-Similar to the minimize step we can reduce the number of computed intersections, but in this cases we are just changing the order that we compute the intersections. Since this operation is commutative we can compute it in any order and achieve the same result.
+Similar to the minimize step we can reduce the number of computed intersections, but in this cases we are just changing the order that we compute the intersections. Since this operation is associative (but not commutative) we can group/start the computation at any point and achieve the same result.
 
 But in this case we can't be so aggresive as the minimize step, because the score would be the final size of the intersection (we only have an upper bound) and to know this we need to compute the intersection it self.
 
@@ -815,12 +815,12 @@ for (j, ts) in final_tokens.windows(2).enumerate() {
 let lhs = &final_tokens[i];
 let mut lhs_len = lhs.len() as u32;
 let lhs = token_to_packed.get(lhs).unwrap();
-
+benchmarking and fine
 let rhs = &final_tokens[i + 1];
 let mut rhs_len = rhs.len() as u32;
 let rhs = token_to_packed.get(rhs).unwrap();
 
-let mut result = lhs.intersect::<I>(*rhs, lhs_len, stats);
+let mut result = lhs.intersect::<I>(*rhs, lhs_len);
 let mut result_borrow = BorrowRoaringishPacked::new(&result);
 
 let mut left_i = i.wrapping_sub(1);
@@ -874,7 +874,7 @@ let rhs = &final_tokens[i + 1];
 let mut rhs_len = rhs.len() as u32;
 let rhs = token_to_packed.get(rhs).unwrap();
 
-let mut result = lhs.intersect::<I>(*rhs, lhs_len, stats);
+let mut result = lhs.intersect::<I>(*rhs, lhs_len);
 let mut result_borrow = BorrowRoaringishPacked::new(&result);
 
 let mut left_i = i.wrapping_sub(1);
@@ -890,12 +890,12 @@ loop {
             if lhs.len() <= rhs.len() {
                 lhs_len += t_lhs.len() as u32;
 
-                result = lhs.intersect::<I>(result_borrow, lhs_len, stats);
+                result = lhs.intersect::<I>(result_borrow, lhs_len);
                 result_borrow = BorrowRoaringishPacked::new(&result);
 
                 left_i = left_i.wrapping_sub(1);
             } else {
-                result = result_borrow.intersect::<I>(*rhs, rhs_len, stats);
+                result = result_borrow.intersect::<I>(*rhs, rhs_len);
                 result_borrow = BorrowRoaringishPacked::new(&result);
 
                 lhs_len += rhs_len;
@@ -908,7 +908,7 @@ loop {
             let lhs = token_to_packed.get(t_lhs).unwrap();
             lhs_len += t_lhs.len() as u32;
 
-            result = lhs.intersect::<I>(result_borrow, lhs_len, stats);
+            result = lhs.intersect::<I>(result_borrow, lhs_len);
             result_borrow = BorrowRoaringishPacked::new(&result);
 
             left_i = left_i.wrapping_sub(1);
@@ -916,7 +916,7 @@ loop {
         (None, Some(t_rhs)) => {
             let rhs = token_to_packed.get(t_rhs).unwrap();
 
-            result = result_borrow.intersect::<I>(*rhs, rhs_len, stats);
+            result = result_borrow.intersect::<I>(*rhs, rhs_len);
             result_borrow = BorrowRoaringishPacked::new(&result);
 
             lhs_len += rhs_len;
@@ -936,4 +936,418 @@ This leads to another huge win, specially for queries that have a super rare tok
 # Here begins the fun
 Now that the boring stuff is past us, let's start the fun part... Again just as a reminder on how the intersection works: we do two phases of intersection, one for the conventional intersection and other for the bits that would cross the group boundry and in the end we merge this two.
 
-In this section we will take a look at assembly, some cool tools to analyze this assembly, SIMD (AVX512), differences in microarchitecture of AMD and Intel chips, emulation of instructions and a lot more. So again sorry to bother you with all of the previous stuff, but it was important.
+In this section we will take a look at assembly, some cool tools to analyze this assembly, Simd (AVX512), differences in microarchitecture of AMD and Intel chips, emulation of instructions and a lot more. So again sorry to bother you with all of the previous stuff, but it was important.
+
+For you better understanding on how the two intersection phases work, let's start with the naive version and build our way to the Simd one.
+
+The intersection used by the search function is a generic, and the type needs to implement the `Intersect` trait.
+
+```rust
+pub trait Intersect {
+    fn intersect<const FIRST: bool>(
+        lhs: BorrowRoaringishPacked<'_, Aligned>,
+        rhs: BorrowRoaringishPacked<'_, Aligned>,
+        lhs_len: u32,
+    ) -> (Vec<u64, Aligned64>, Vec<u64, Aligned64>) {
+        let mut lhs_i = 0;
+        let mut rhs_i = 0;
+
+        let buffer_size = Self::intersection_buffer_size(lhs, rhs);
+
+        let mut i = 0;
+        let mut packed_result: Box<[MaybeUninit<u64>], Aligned64> =
+            Box::new_uninit_slice_in(buffer_size, Aligned64::default());
+
+        let mut j = 0;
+        let mut msb_packed_result: Box<[MaybeUninit<u64>], Aligned64> = if FIRST {
+            Box::new_uninit_slice_in(lhs.0.len() + 1, Aligned64::default())
+        } else {
+            Box::new_uninit_slice_in(0, Aligned64::default())
+        };
+
+        let add_to_group = (lhs_len / 16) as u64 * ADD_ONE_GROUP;
+        let lhs_len = (lhs_len % 16) as u16;
+
+        let msb_mask = !(u16::MAX >> lhs_len);
+        let lsb_mask = !(u16::MAX << lhs_len);
+
+        Self::inner_intersect::<FIRST>(
+            lhs,
+            rhs,
+            &mut lhs_i,
+            &mut rhs_i,
+            &mut packed_result,
+            &mut i,
+            &mut msb_packed_result,
+            &mut j,
+            add_to_group,
+            lhs_len,
+            msb_mask,
+            lsb_mask,
+        );
+
+        let (packed_result_ptr, a0) = Box::into_raw_with_allocator(packed_result);
+        let (msb_packed_result_ptr, a1) = Box::into_raw_with_allocator(msb_packed_result);
+        unsafe {
+            (
+                Vec::from_raw_parts_in(packed_result_ptr as *mut _, i, buffer_size, a0),
+                if FIRST {
+                    Vec::from_raw_parts_in(msb_packed_result_ptr as *mut _, j, lhs.0.len() + 1, a1)
+                } else {
+                    Vec::from_raw_parts_in(msb_packed_result_ptr as *mut _, 0, 0, a1)
+                },
+            )
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn inner_intersect<const FIRST: bool>(
+        lhs: BorrowRoaringishPacked<'_, Aligned>,
+        rhs: BorrowRoaringishPacked<'_, Aligned>,
+
+        lhs_i: &mut usize,
+        rhs_i: &mut usize,
+
+        packed_result: &mut Box<[MaybeUninit<u64>], Aligned64>,
+        i: &mut usize,
+
+        msb_packed_result: &mut Box<[MaybeUninit<u64>], Aligned64>,
+        j: &mut usize,
+
+        add_to_group: u64,
+        lhs_len: u16,
+        msb_mask: u16,
+        lsb_mask: u16,
+    );
+
+    fn intersection_buffer_size(
+        lhs: BorrowRoaringishPacked<'_, Aligned>,
+        rhs: BorrowRoaringishPacked<'_, Aligned>,
+    ) -> usize;
+}
+```
+
+As you can see the `intersect` and `inner_intersect` have a const generic that condionally enables code depending on the intersection phase.
+
+**Note:** You might not like this, but I personally perfer having this constant flag than duplicating a bunch of code.
+
+The `intersect` function is pre implemented and is respossible for allocating the result buffers, if you look closely `msb_packed_result` have 0 capacity on the second phase, the reason is that the first phase is responsible for the normal intersection + finding the candidates for the second intersection phase and they are saved in the `msb_packed_result`, that's why we don't need this variable in the second pass.
+
+Another funny thing you might have noticed is the `Aligned64` type. Like the values retrieved from the mmap I need this to be 64 byte aligned, one easy way to solve this is to specify a custom allocator for the container. In this case I created an allocator that changes the alignment of the inner type to be whatever I want, here is the code.
+
+```rust
+#[derive(Default)]
+pub struct AlignedAllocator<const N: usize>;
+unsafe impl<const N: usize> Allocator for AlignedAllocator<N> {
+    fn allocate(
+        &self,
+        layout: std::alloc::Layout,
+    ) -> Result<std::ptr::NonNull<[u8]>, std::alloc::AllocError> {
+        unsafe {
+            let p = alloc(layout.align_to(N).unwrap());
+            let s = std::ptr::slice_from_raw_parts_mut(p, layout.size());
+            #[cfg(debug_assertions)]
+            return NonNull::new(s).ok_or(std::alloc::AllocError);
+
+            #[cfg(not(debug_assertions))]
+            return Ok(NonNull::new_unchecked(s));
+        }
+    }
+
+    unsafe fn deallocate(&self, ptr: std::ptr::NonNull<u8>, layout: std::alloc::Layout) {
+        dealloc(ptr.as_ptr(), layout.align_to(N).unwrap());
+    }
+}
+
+pub type Aligned64 = AlignedAllocator<64>;
+```
+
+{% details **Explanation** on why I use `Box<[MaybeUninit<T>]` **(you can ignore if you want)** %}
+You might also have noticed something different: **Why am I not using `Vec` ?** Because it's bad... I'm kidding it's not bad, but it makes the life of the compiler harder when optimizing, specially because I know the upper bound of my buffers I can pre allocate them. But again you might **Why are you not using `Vec::with_capacity` ?** Because the compiler is dumb, even if you specify the capacity, when pushing elements it will create a branch instruction (pretty bad).
+
+Look at the following [assembly for each function](https://godbolt.org/#g:!((g:!((g:!((h:codeEditor,i:(filename:'1',fontScale:14,fontUsePx:'0',j:1,lang:rust,paneName:'Editor+%231',selection:(endColumn:18,endLineNumber:13,positionColumn:18,positionLineNumber:13,selectionStartColumn:8,selectionStartLineNumber:13,startColumn:8,startLineNumber:13),source:'%23!!%5Bfeature(vec_push_within_capacity)%5D%0A%0A%23%5Bno_mangle%5D%0Apub+fn+vec_with_capacity(cap:+usize)+-%3E+Vec%3Cu32%3E+%7B%0A++++let+mut+v+%3D+Vec::with_capacity(cap)%3B%0A++++for+_+in+0..cap+%7B%0A++++++++v.push(10)%3B%0A++++%7D%0A++++v%0A%7D%0A%0A%23%5Bno_mangle%5D%0Apub+fn+box_uninit(cap:+usize)+-%3E+Vec%3Cu32%3E+%7B%0A++++let+mut+v+%3D+Box::new_uninit_slice(cap)%3B%0A++++for+i+in+v.iter_mut()+%7B%0A++++++++i.write(10)%3B%0A++++%7D%0A++++Vec::from(unsafe+%7B+v.assume_init()+%7D)%0A%7D%0A%0A%0A%23%5Bno_mangle%5D%0Apub+fn+vec_within_capacity(cap:+usize)+-%3E+Vec%3Cu32%3E+%7B%0A++++let+mut+v+%3D+Vec::with_capacity(cap)%3B%0A++++for+_+in+0..cap+%7B%0A++++++++unsafe+%7B+%0A++++++++++++v%0A++++++++++++.push_within_capacity(10)%0A++++++++++++.unwrap_unchecked()%3B+%0A++++++++%7D%0A++++%7D%0A++++v%0A%7D'),l:'5',n:'0',o:'Editor+%231',t:'0')),k:42.77886497064579,l:'4',m:34.54182951670623,n:'0',o:'',s:0,t:'0'),(g:!((h:compiler,i:(compiler:nightly,filters:(b:'0',binary:'1',binaryObject:'1',commentOnly:'0',debugCalls:'1',demangle:'0',directives:'0',execute:'1',intel:'0',libraryCode:'0',trim:'1',verboseDemangling:'0'),flagsViewOpen:'1',fontScale:14,fontUsePx:'0',j:1,lang:rust,libs:!(),options:'-C+opt-level%3D3',overrides:!(),paneName:'Source+%231',selection:(endColumn:1,endLineNumber:1,positionColumn:1,positionLineNumber:1,selectionStartColumn:1,selectionStartLineNumber:1,startColumn:1,startLineNumber:1),source:1),l:'5',n:'0',o:'Source+%231',t:'0'),(h:cfg,i:(compilerName:'rustc+nightly',editorid:1,j:1,paneName:'Graph+%231',selectedFunction:'vec_with_capacity:',treeid:0),l:'5',n:'0',o:'Graph+%231',t:'0')),header:(),k:57.22113502935421,l:'4',n:'0',o:'',s:1,t:'0')),l:'2',m:100,n:'0',o:'',t:'0')),version:4) `vec_with_capacity`, `box_uninit` and `vec_within_capacity` (you can change the function by clicking on the to left the tab (besides the **Export** button)), all of the loops are in the bottom right corner of the graph.
+
+The `vec_with_capacity` adds one big function call to `RawVec<T,A>::grow_one` (even though we are adding the same amount of elements as specified in the capacity), and if you look at the assembly of this function with have a branch. **Do you know what branching does to optimiziers ?** It messes with their ability to vectorize. If you look at `box_uninit` or `vec_within_capacity` the compiler even vectorized the loop for us.
+
+I personally prefer the syntax of `box_uninit` that's why I use it instead of `vec_within_capacity` (it also requires a feature flag, even though that's not a problem).
+
+So here is the reason on why you are going to see `Box<[MaybeUninit<T>]` here on out.
+{% enddetails %}
+<br/>
+
+The other resoposibility of the `intersect` function has something to do with the `lhs_len` parameter. Let's try to understand what this parameter means first. Assume the following token merger/minimization:
+```
+len:    50         10         5      40
+...| t_0 t_1 | t_2 t_3 t_4 | t_5 | t_6 t_7 | ...
+                           ^
+                Start intersecting here
+```
+
+1. First intersection: `t_2 t_3 t_4` and `t_5`, the lhs token has a length of 3 and rhs has length 1. Let's save this into two temporary variables `temp_lhs_len = 3` and `temp_rhs_len = 1` and the parameter `lhs_len = temp_lhs_len`.
+    * This means that instead of left shifting by 1 we shift by 3 to calculate the intersection.
+    * This is correct because the position of `t_2 t_3 t_4` is the same as `t_2` and we need to intersect it with a token that is after `t_3` and `t_4`.
+2. Second intersection: `t_2 t_3 t_4 t_5` and `t_6 t_7` in this case `lhs_len = temp_rhs_len` (which is 1), we add `temp_rhs_len` to `temp_lhs_len` (`temp_lhs_len += temp_rhs_len` (which is 4)), and make `temp_rhs_len = 2` (the length of `t_6 t_7`) (this will be used in the next intersection with the right token)
+    * This is correct because after the first intersection the position of `t_2 t_3 t_4 t_5` is the same as `t_5` and the position of `t_6 t_7` is the same as `t_6`.
+3. Third intersection: `t_0 t_1` and `t_2 t_3 t_4 t_5 t_6 t_7`, at this point `temp_lhs_len = 4` so we add the length of the lhs token (2 in this case) making `temp_lhs_len = 6` and the parameter `lhs_len = temp_lhs_len`.
+    * This is correct because the position of `t_0 t_1` is the same as `t_0` and `t_2 t_3 t_4 t_5 t_6 t_7` has the same postion as `t_6` (not `t_7`) (the position after intersecting with a token to the right is the position of the first token of the rhs sequence)
+4. Repeat this for the rest of the lhs and rhs tokens.
+
+With this I hope the `lhs_len` parameter made sense. **So why do we need it ?** We can just devide this value by 16 (remembering that each group holds 16 values) to find how much we need to add to the group of lhs to match rhs (remembering that the intersection is done in the 48 MSB's, document id and group, so they need to be equal).
+
+And the remainder of this division tells us how much we need to shift the lhs values (16 LSB's) to intersect with the rhs ones. We also use this remainder to calculate two bit masks `msb_mask` and `lsb_mask` (we will talk about them later). For example is the remainder is 3, this masks will assume the following values (just keep them in mind): 
+
+* `msb_mask = 0b11100000 00000000`
+* `lsb_mask = 0b00000000 00000111`
+
+With this we are ready to look at the naive intersection, yay !!
+
+## Naive intersection
+To more easily analyze the code of each intersection phase I will separete it two fictitious functions, but in the final code they are in the same function with the const generic flag.
+
+Here is the code for the first intersection phase:
+
+```rust
+pub const ADD_ONE_GROUP: u64 = u16::MAX as u64 + 1;
+
+const fn clear_values(packed: u64) -> u64 {
+    packed & !0xFFFF
+}
+
+const fn unpack_values(packed: u64) -> u16 {
+    packed as u16
+}
+
+pub struct NaiveIntersect;
+impl IntersectSeal for NaiveIntersect {}
+
+impl Intersect for NaiveIntersect {
+    /// Again this is a fictitious in this case FIRST = true
+    fn inner_intersect_first_phase(
+        lhs: BorrowRoaringishPacked<'_, Aligned>,
+        rhs: BorrowRoaringishPacked<'_, Aligned>,
+
+        lhs_i: &mut usize,
+        rhs_i: &mut usize,
+
+        packed_result: &mut Box<[MaybeUninit<u64>], Aligned64>,
+        i: &mut usize,
+
+        msb_packed_result: &mut Box<[MaybeUninit<u64>], Aligned64>,
+        j: &mut usize,
+
+        add_to_group: u64,
+        lhs_len: u16,
+        msb_mask: u16,
+        lsb_mask: u16,
+    ) {
+        while *lhs_i < lhs.0.len() && *rhs_i < rhs.0.len() {
+            let lhs_packed = unsafe { *lhs.0.get_unchecked(*lhs_i) } + add_to_group;
+            let lhs_doc_id_group = clear_values(lhs_packed);
+            let lhs_values = unpack_values(lhs_packed);
+
+            let rhs_packed = unsafe { *rhs.0.get_unchecked(*rhs_i) };
+            let rhs_doc_id_group = clear_values(rhs_packed);
+            let rhs_values = unpack_values(rhs_packed);
+
+            match lhs_doc_id_group.cmp(&rhs_doc_id_group) {
+                std::cmp::Ordering::Equal => {
+                    unsafe {
+                        let intersection = (lhs_values << lhs_len) & rhs_values;
+                        packed_result
+                            .get_unchecked_mut(*i)
+                            .write(lhs_doc_id_group | intersection as u64);
+
+                        msb_packed_result
+                            .get_unchecked_mut(*j)
+                            .write(lhs_packed + ADD_ONE_GROUP);
+
+                        *j += (lhs_values & msb_mask > 0) as usize;
+                    }
+                    *i += 1;
+                    *lhs_i += 1;
+                    *rhs_i += 1;
+                }
+                std::cmp::Ordering::Greater => *rhs_i += 1,
+                std::cmp::Ordering::Less => {
+                    unsafe {
+                        msb_packed_result
+                            .get_unchecked_mut(*j)
+                            .write(lhs_packed + ADD_ONE_GROUP);
+                        *j += (lhs_values & msb_mask > 0) as usize;
+                    }
+                    *lhs_i += 1;
+                }
+            }
+        }
+    }
+
+    fn intersection_buffer_size(
+        lhs: BorrowRoaringishPacked<'_, Aligned>,
+        rhs: BorrowRoaringishPacked<'_, Aligned>,
+    ) -> usize {
+        lhs.0.len().min(rhs.0.len())
+    }
+}
+```
+
+The code it self is not that hard to understand, so let's go through it.
+
+Imagine this loop as the basic intersection algo for two sorted arrays (and in our case they are sorted from lowest to highest document id and group) and like the convetional algo we increment the index of lhs or rhs depending which one is the smallest, if they are equal advance both (1/3 of the fuction already explained, noice).
+
+But our case as mentioned multiple times the intersection is done with only the 48 MSB's that's why we call the function `clear_values`, so we use the document id and group from the lhs (without forgetting to add to the group) and compare with the rhs one (2/3 done).
+
+And to finish, let's analyze what we write into the output buffers (`packed_result` and `msb_packed_result`).
+
+If `lhs_doc_id_group == rhs_doc_id_group`
+* We compute the intersection of the values (similar to how the original implementation of Doug does, but in here we shift left by the remainder of the division).
+* This intersection can be 0, we could check with an if or do it branchless, but we can also check this during the merge phase, and that's what I decided to do (this makes our lifes in the Simd version easier).
+    * We could do two checks, one here and one in the merge, but there is no need/meaninful speed difference, so it's fine
+* We also do a branchless write only if the bits of lhs value would cross the group boundry when shifting (that's why we have the `msb_mask`), to save the work in the second phase we already add one to the group (the `msb_packed_result` is used in the second intersection phase as the lhs one).
+
+The operation described above of writing to `msb_packed_result` is repeated when incrementing lhs index (the reason is that in the second phase we need to analyze all possible cases where the bits would cross the group boundry) (3/3 done).
+
+And with that I hope now you know how the first phase of the naive intersection works.
+
+Let's analyze the second phase now, it will be easier this time since we already now how phase one works.
+
+```rust
+    //...
+
+    /// Again this is a fictitious in this case FIRST = false
+    fn inner_intersect_second_phase(
+        lhs: BorrowRoaringishPacked<'_, Aligned>,
+        rhs: BorrowRoaringishPacked<'_, Aligned>,
+
+        lhs_i: &mut usize,
+        rhs_i: &mut usize,
+
+        packed_result: &mut Box<[MaybeUninit<u64>], Aligned64>,
+        i: &mut usize,
+
+        msb_packed_result: &mut Box<[MaybeUninit<u64>], Aligned64>,
+        j: &mut usize,
+
+        add_to_group: u64,
+        lhs_len: u16,
+        msb_mask: u16,
+        lsb_mask: u16,
+    ) {
+        while *lhs_i < lhs.0.len() && *rhs_i < rhs.0.len() {
+            let lhs_packed = unsafe { *lhs.0.get_unchecked(*lhs_i) };
+            let lhs_doc_id_group = clear_values(lhs_packed);
+            let lhs_values = unpack_values(lhs_packed);
+
+            let rhs_packed = unsafe { *rhs.0.get_unchecked(*rhs_i) };
+            let rhs_doc_id_group = clear_values(rhs_packed);
+            let rhs_values = unpack_values(rhs_packed);
+
+            match lhs_doc_id_group.cmp(&rhs_doc_id_group) {
+                std::cmp::Ordering::Equal => {
+                    unsafe {
+                        let intersection =
+                            lhs_values.rotate_left(lhs_len as u32) & lsb_mask & rhs_values;
+                        packed_result
+                            .get_unchecked_mut(*i)
+                            .write(lhs_doc_id_group | intersection as u64);
+                    }
+                    *i += 1;
+                    *lhs_i += 1;
+                    *rhs_i += 1;
+                }
+                std::cmp::Ordering::Greater => *rhs_i += 1,
+                std::cmp::Ordering::Less => *lhs_i += 1
+            }
+        }
+    }
+
+    //...
+```
+
+To reiterate the lhs in this case is the `msb_packed_result` from the previous phase.
+
+As you can see they are very, very similar (that's why I decided to use the const generic), there are a few changes:
+* We don't need to add a value to the lhs document id and group (since we already did this in the previous phase)
+* The way we compute the values intersection is different. Instead of shifting left, we do a rotate left (shifting where the bits wrap up to the other side), intersect it with the rhs values and clean up with the `lsb_mask`.
+* We don't need to write to `msb_packed_result`.
+
+And this is the entirety of the intersection process, first and second phase. Easy right ?
+
+**Note:** Having this approach of computing the mask and having an arbitrary value for the lhs token length solves the other problem discussed in the original article. Slop problem (yes it's called slop).
+
+{% details **Code** for the naive intersection merged into a single function **(you can ignore if you want)** %}
+```rust
+    // ...
+
+    fn inner_intersect<const FIRST: bool>(
+        lhs: BorrowRoaringishPacked<'_, Aligned>,
+        rhs: BorrowRoaringishPacked<'_, Aligned>,
+
+        lhs_i: &mut usize,
+        rhs_i: &mut usize,
+
+        packed_result: &mut Box<[MaybeUninit<u64>], Aligned64>,
+        i: &mut usize,
+
+        msb_packed_result: &mut Box<[MaybeUninit<u64>], Aligned64>,
+        j: &mut usize,
+
+        add_to_group: u64,
+        lhs_len: u16,
+        msb_mask: u16,
+        lsb_mask: u16,
+    ) {
+        while *lhs_i < lhs.0.len() && *rhs_i < rhs.0.len() {
+            let lhs_packed =
+                unsafe { *lhs.0.get_unchecked(*lhs_i) } + if FIRST { add_to_group } else { 0 };
+            let lhs_doc_id_group = clear_values(lhs_packed);
+            let lhs_values = unpack_values(lhs_packed);
+
+            let rhs_packed = unsafe { *rhs.0.get_unchecked(*rhs_i) };
+            let rhs_doc_id_group = clear_values(rhs_packed);
+            let rhs_values = unpack_values(rhs_packed);
+
+            match lhs_doc_id_group.cmp(&rhs_doc_id_group) {
+                std::cmp::Ordering::Equal => {
+                    unsafe {
+                        if FIRST {
+                            let intersection = (lhs_values << lhs_len) & rhs_values;
+                            packed_result
+                                .get_unchecked_mut(*i)
+                                .write(lhs_doc_id_group | intersection as u64);
+
+                            msb_packed_result
+                                .get_unchecked_mut(*j)
+                                .write(lhs_packed + ADD_ONE_GROUP);
+
+                            *j += (lhs_values & msb_mask > 0) as usize;
+                        } else {
+                            let intersection =
+                                lhs_values.rotate_left(lhs_len as u32) & lsb_mask & rhs_values;
+                            packed_result
+                                .get_unchecked_mut(*i)
+                                .write(lhs_doc_id_group | intersection as u64);
+                        }
+                    }
+                    *i += 1;
+                    *lhs_i += 1;
+                    *rhs_i += 1;
+                }
+                std::cmp::Ordering::Greater => *rhs_i += 1,
+                std::cmp::Ordering::Less => {
+                    if FIRST {
+                        unsafe {
+                            msb_packed_result
+                                .get_unchecked_mut(*j)
+                                .write(lhs_packed + ADD_ONE_GROUP);
+                            *j += (lhs_values & msb_mask > 0) as usize;
+                        }
+                    }
+                    *lhs_i += 1;
+                }
+            }
+        }
+    }
+
+    // ...
+```
+{% enddetails %}
