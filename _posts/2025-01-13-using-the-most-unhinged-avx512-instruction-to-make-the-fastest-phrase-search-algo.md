@@ -1470,6 +1470,8 @@ Don't let reviewers tell you that this generation is bad, that the 9700x is a ba
 
 Just to be 100% that chip engineers understood my message, **DON'T KILL THIS INSTRUCTION !!!**
 
+**Note:** After switching to the 9700x I didn't experience a 15x improvement and that was/is expected. The hot loop consist of another operations (as you will see), so in reality I got 2-5x depending on the query. Pretty good win IMHO.
+
 ## Compress/Compress Store
 This is the last piece of the puzzle, for us to understand the simd version. Compress and Compress Store are also CPU instructions and they are versy similar. 
 
@@ -1704,6 +1706,8 @@ Loop over this capped slice, so instead of incrementing by 1 the lhs or rhs inde
 
 **Note:** Since all document ids and groups in lhs/rhs are different (increasing order) we know that the number of bits set in each mask is the same.
 
+**Note:** If lhs_mask is 0 and consequently rhs_mask will also be 0. We could introduce a branch here and skip the whole unsafe block I'm about to describe, but doing uncodionally is faster for the first phase (probably hard for the branch predictor), but in the second phase as you will see there is a branch and in that case it helps a lot (probably because it's easier for the branch predictor to know that is ok to skip the workload).
+
 * Use the lhs mask to compress the lhs packed (fill with 0 the rest), get the document id and group from this compressed version, also gets the values.
 
 **Note:** It's faster to do a Compress followed by 2 `ands` than do one aditional `and` in the beginning to get the values from the packed version and do 2 Compress one for the document id and group and other for the values.
@@ -1744,4 +1748,98 @@ Similar to every simd algo we need to finish it of by doing a scalar version, so
 
 I hope all of this made sense, it's very similar to the naive version in various points. The only exoteric things we need to do are related to Vp2intersect and Compress/Compress Store/Compress + Store.
 
-Here is a diagram of one iteration of the loop, I hope this helps.
+Here is a diagram of one iteration of the loop, I hope this helps (let's use the syntax `document id,group,values` to avoid having to write binary).
+
+```
+// let's assume this values
+add_to_group: 1
+lhs_len: 1
+
+lhs_packed: ... | 1,0,v_0 | 1,1,v_1 | 5,0,v_2 | 5,2,v_3 | 5,3,v_4 | 6,2,v_5 | 7,0,v_6 | 8,1,v_7 | ...
+                ^
+              lhs_i
+rhs_packed: ... | 1,1,v_8 | 2,0,v_9 | 5,3,v_10| 5,5,v_11| 6,1,v_12| 9,0,v_13| 9,1,v_14| 9,2,v_15| ...
+                ^
+              rhs_i
+
+lhs_last: 8,2,v_7 (already added add_to_group)
+lhs_last: 9,2,v_15
+
+lhs_pack: 1,1,v_0 | 1,2,v_1 | 5,1,v_2 | 5,3,v_3 | 5,4,v_4 | 6,3,v_5 | 7,1,v_6 | 8,2,v_7 (already added add_to_group)
+rhs_pack: 1,1,v_8 | 2,0,v_9 | 5,3,v_10| 5,5,v_11| 6,1,v_12| 9,0,v_13| 9,1,v_14| 9,2,v_15
+
+lhs_doc_id_group: 1,1,0   | 1,2,0   | 5,1,0   | 5,3,0   | 5,4,0   | 6,3,0   | 7,1,0   | 8,2,0
+rhs_doc_id_group: 1,1,0   | 2,0,0   | 5,3,0   | 5,5,0   | 6,1,0   | 9,0,0   | 9,1,0   | 9,2,0
+rhs_values:       0,0,v_8 | 0,0,v_9 | 0,0,v_10| 0,0,v_11| 0,0,v_12| 0,0,v_13| 0,0,v_14| 0,0,v_15
+
+
+// Calculate the vp2intersect of lhs_doc_id_group and rhs_doc_id_group
+lhs_mask: 1 | 0 | 0 | 1 | 0 | 0 | 0 | 0 (0b10010000)
+rhs_mask  1 | 0 | 1 | 0 | 0 | 0 | 0 | 0 (0b10100000)
+
+// Compress operation of lhs_pack and lhs_mask
+                       1,1,v_0 | 1,2,v_1 | 5,1,v_2 | 5,3,v_3 | 5,4,v_4 | 6,3,v_5 | 7,1,v_6 | 8,2,v_7
+                       1       | 0       | 0       | 1       | 0       | 0       | 0       | 0 
+lhs_pack_compress:     1,1,v_0 | 5,3,v_3 | 0,0,0   | 0,0,0   | 0,0,0   | 0,0,0   | 0,0,0   | 0,0,0
+doc_id_group_compress: 1,1,0   | 5,3,0   | 0,0,0   | 0,0,0   | 0,0,0   | 0,0,0   | 0,0,0   | 0,0,0
+lhs_values_compress:   0,0,v_0 | 0,0,v_3 | 0,0,0   | 0,0,0   | 0,0,0   | 0,0,0   | 0,0,0   | 0,0,0
+
+// Compress operation of rhs_values and rhs_mask
+                       0,0,v_8 | 0,0,v_9 | 0,0,v_10| 0,0,v_11| 0,0,v_12| 0,0,v_13| 0,0,v_14| 0,0,v_15
+                       1       | 0       | 1       | 0       | 0       | 0       | 0       | 0
+rhs_values_compress:   0,0,v_8 | 0,0,v_10| 0,0,0   | 0,0,0   | 0,0,0   | 0,0,0   | 0,0,0   | 0,0,0
+
+// Bitwise intersection between lhs_values_compress and rhs_values_compress
+// (I'm going to ignore the document id an group, since they are 0 
+// to make it fit on screen, but they are still there)
+intersection: (v_0 << 1)&v_8 | (v_3 << 1)&v_10 | (0 << 1)&0 | (0 << 1)&0 | (0 << 1)&0 | (0 << 1)&0 | (0 << 1)&0 | (0 << 1)&0
+// Simplifying
+intersection: (v_0 << 1)&v_8 | (v_3 << 1)&v_10 | 0 | 0 | 0 | 0 | 0 | 0
+
+// Store into packed_result (lhs_values_compress | intersection)
+packed_result: ... | 1,1,(v_0 << 1)&v_8 | 5,3,(v_3 << 1)&v_10 | 0,0,0 | 0,0,0 | 0,0,0 | 0,0,0 | 0,0,0 | 0,0,0
+                   ^
+                   i
+// i is incremented by 2, since there is 2 bits in lhs_mask (0b10010000)
+i: i + 2
+// Now i points here when the next iteration starts
+packed_result: ... | 1,1,(v_0 << 1)&v_8 | 5,3,(v_3 << 1)&v_10 | 0,0,0 | 0,0,0 | 0,0,0 | 0,0,0 | 0,0,0 | 0,0,0
+                                                              ^
+                                                              i
+
+// Since lhs_last <= rhs_last we need to analyze the MSB's
+// msb_mask is 64bit x 8 lanes, but the 16LSB's is where this value can 
+// change (because this is where the values are poisitioned), so the
+// 48 MSB's are zeroed out.
+
+// (lhs_pack & msb_mask) > 0
+// I'm going to randomly generete some bits for the mask for the sake
+// of the example
+mask: 0 | 1 | 1 | 0 | 1 | 0 | 1 | 0 (0b01101010)
+
+// lhs_pack + ADD_ONE_GROUP
+pack_plus_one 1,2,v_0 | 1,3,v_1 | 5,2,v_2 | 5,4,v_3 | 5,5,v_4 | 6,4,v_5 | 7,2,v_6 | 8,3,v_7
+
+// Compress of pack_plus_one and mask
+          1,2,v_0 | 1,3,v_1 | 5,2,v_2 | 5,4,v_3 | 5,5,v_4 | 6,4,v_5 | 7,2,v_6 | 8,3,v_7
+          0       | 1       | 1       | 0       | 1       | 0       | 1       | 0
+compress: 1,3,v_1 | 5,2,v_2 | 5,5,v_4 | 7,2,v_6 | 0,0,0   | 0,0,0   | 0,0,0   | 0,0,0
+
+// Store into msb_packed_result
+msb_packed_result: ... | 1,3,v_1 | 5,2,v_2 | 5,5,v_4 | 7,2,v_6 | 0,0,0 | 0,0,0 | 0,0,0 | 0,0,0 | ...
+                       ^
+                       j
+// j is incremented by 4, since there is 4 bits in mask (0b01101010)
+j: j + 4
+// Now j points here when the next iteration starts
+msb_packed_result: ... | 1,3,v_1 | 5,2,v_2 | 5,5,v_4 | 7,2,v_6 | 0,0,0 | 0,0,0 | 0,0,0 | 0,0,0 | ...
+                                                               ^
+                                                               j
+
+// Since lhs_last <= rhs_last
+lhs_i: lhs_i + N (N = 8)
+rhs_i: rhs_i
+need_to_analyze_msb: false
+```
+
+And that's one full iteration of the loop, I know it seems like a lot but it's not. There is a bunch of numbers on the screen but most of the operations are very simple, so I hope you can understand it.
