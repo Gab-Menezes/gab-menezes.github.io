@@ -243,19 +243,20 @@ a.toc-link {
   font-weight: 700
 }
 
+// $toc-width: $content-width * 0.35;
 #toc {
   position: fixed;                /* Fix the TOC to the right side */
-  height: calc(100vh - 2 * ($top-line-height + 15px)); /* Make the TOC stretch the entire height of the viewport */
-  top: $top-line-height + 15px;   /* Distance from the top of the page */
+  height: calc(100vh - 2 * ($top-line-height + $spacing-unit)); /* Make the TOC stretch the entire height of the viewport */
+  top: $top-line-height + $spacing-unit;   /* Distance from the top of the page */
 
   right: 60px;                    /* Distance from the right side of the page */
-  width: $content-width * 0.35;                   /* Set the width of the TOC */
+  width: $content-width * 0.35;   /* Set the width of the TOC */
   padding: 10px;                  /* Padding inside the TOC */
 
   z-index: 1000;                  /* Ensure the TOC appears above other content */
   overflow-y: auto;               /* Allow scrolling if TOC content is too long */
 
-  @media (max-width: $content-width) {
+  @media (max-width: 1800px) {
     display: none;
   }
 }
