@@ -1101,7 +1101,7 @@ And the remainder of this division tells us how much we need to shift the lhs va
 
 With this we are ready to look at the naive intersection, yay !!
 
-## Naive intersection
+## Naive Intersection
 To more easily analyze the code of each intersection phase I will separete it two fictitious functions, but in the final code they are in the same function with the const generic flag.
 
 Here is the code for the first intersection phase:
@@ -1201,7 +1201,8 @@ And to finish, let's analyze what we write into the output buffers (`packed_resu
 If `lhs_doc_id_group == rhs_doc_id_group`
 * We compute the intersection of the values (similar to how the original implementation of Doug does, but in here we shift left by the remainder of the division).
 * This intersection can be 0, we could check with an if or do it branchless, but we can also check this during the merge phase, and that's what I decided to do (this makes our lifes in the Simd version easier).
-    * We could do two checks, one here and one in the merge, but there is no need/meaninful speed difference, so it's fine
+    * We could do two checks, one here and one in the merge, but there is no need/meaninful speed difference, so it's fine.
+* Write the or between `lhs_doc_id_group` and the `intersection` to `packed_result`.
 * We also do a branchless write only if the bits of lhs value would cross the group boundry when shifting (that's why we have the `msb_mask`), to save the work in the second phase we already add one to the group (the `msb_packed_result` is used in the second intersection phase as the lhs one).
 
 The operation described above of writing to `msb_packed_result` is repeated when incrementing lhs index (the reason is that in the second phase we need to analyze all possible cases where the bits would cross the group boundry) (3/3 done).
@@ -1367,7 +1368,7 @@ I'm serious don't deprecate this instruction...
 
 Ok, so how does this instruction works ? In our case we are intrested in the 64 bit - 8 wide version, so here is the assembly for it:
 ```asm
-vp2intersectq k2, zmm0, zmm1
+vp2intersectq k, zmm, zmm
 ```
 
 The fun thing about this little fella is that differently from other instruction it generates two mask, so it will clobber on additional register that is not specified in the operands, in this case is `k3` (`kn+1`).
@@ -1378,7 +1379,7 @@ So let's do an example to fully grasp the power of this instruction:
 ```
 zmm0:      0 | 0 | 3 | 2 | 3 | 8 | 9 | 1
 zmm1:      9 | 5 | 3 | 0 | 7 | 7 | 7 | 7
------------------------------------------
+----------------------------------------
 k2 (zmm0): 1 | 1 | 1 | 0 | 1 | 0 | 1 | 0
 k3 (zmm1): 1 | 0 | 1 | 1 | 0 | 0 | 0 | 0
 ```
@@ -1468,3 +1469,279 @@ So yeah I got a Zen 5 chip... Capitalism wins again.
 Don't let reviewers tell you that this generation is bad, that the 9700x is a bad chip and so on... If you need a AVX-512 compatible CPU go get yourself a Zen 5 chip, they are monstrous.
 
 Just to be 100% that chip engineers understood my message, **DON'T KILL THIS INSTRUCTION !!!**
+
+## Compress/Compress Store
+This is the last piece of the puzzle, for us to understand the simd version. Compress and Compress Store are also CPU instructions and they are versy similar. 
+
+The difference is that Compress will write to a register and Compress Store to memory.
+
+By the same is faily easy to tell that they are compressing something, but what exactly ? They basically recieve a register and mask and pack the values from the register if the bit is set in the mask.
+
+```
+zmm0: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7
+k1:   1 | 1 | 0 | 0 | 1 | 0 | 0 | 1
+-----------------------------------
+      0 | 1 | 4 | 7 | X | X | X | X
+```
+
+And `X` can be specified, or can be 0 if you want. Pretty dope right ?
+
+Here are the nmeunomiocs:
+
+```
+vpcompressq zmm {z}, zmm
+vpcompressq zmm {k}, zmm
+vpcompressq m64 {k}, zmm
+```
+
+**Note:** Compress Store I super slow on Zen 4, so people usually do Compress + Store, which was way faster. I thought they fixed it on Zen 5 (the article I shared earlier also says that is better), but at least in my benchmarks doing a Compress + Store is still faster in Zen 5, not by much but a little. I haven't micro benchmarked the instruction, just changed in my use case and measured the impact, that is why you are going to see Compress + Store.
+
+With this we are ready to understand the simd version.
+
+## Simd Intersection
+Similar to the naive version I will split each phase and we will analyze them separately (there will be a diagram at the end showing how things work with a drawing).
+
+**Note:** That's is the place where I spent the most time, I easly rewrote this 20 time trying to save every cycle possible.
+
+```rust
+const N: usize = 8;
+
+const fn clear_values(packed: u64) -> u64 {
+    packed & !0xFFFF
+}
+
+#[inline(always)]
+fn clear_values_simd<const N: usize>(packed: Simd<u64, N>) -> Simd<u64, N>
+where
+    LaneCount<N>: SupportedLaneCount,
+{
+    packed & Simd::splat(!0xFFFF)
+}
+
+#[inline(always)]
+fn unpack_values_simd<const N: usize>(packed: Simd<u64, N>) -> Simd<u64, N>
+where
+    LaneCount<N>: SupportedLaneCount,
+{
+    packed & Simd::splat(0xFFFF)
+}
+
+#[inline(always)]
+unsafe fn vp2intersectq(a: __m512i, b: __m512i) -> (u8, u8) {
+    use std::arch::x86_64::__mmask8;
+
+    let mut mask0: __mmask8;
+    let mut mask1: __mmask8;
+    asm!(
+        "vp2intersectq k2, {0}, {1}",
+        in(zmm_reg) a,
+        in(zmm_reg) b,
+        out("k2") mask0,
+        out("k3") mask1,
+        options(pure, nomem, nostack),
+    );
+
+    (mask0, mask1)
+}
+
+#[inline(always)]
+unsafe fn analyze_msb(
+    lhs_pack: Simd<u64, N>,
+    msb_packed_result: &mut [MaybeUninit<u64>],
+    j: &mut usize,
+    msb_mask: Simd<u64, N>,
+) {
+    let mask = (lhs_pack & msb_mask).simd_gt(Simd::splat(0)).to_bitmask() as u8;
+    let pack_plus_one: Simd<u64, N> = lhs_pack + Simd::splat(ADD_ONE_GROUP);
+    unsafe {
+        let compress = _mm512_maskz_compress_epi64(mask, pack_plus_one.into());
+        _mm512_storeu_epi64(msb_packed_result.as_mut_ptr().add(*j) as *mut _, compress);
+    }
+    *j += mask.count_ones() as usize;
+}
+
+pub struct SimdIntersect;
+impl IntersectSeal for SimdIntersect {}
+
+impl Intersect for SimdIntersect {
+    #[inline(always)]
+    fn inner_intersect_first_phase(
+        lhs: BorrowRoaringishPacked<'_, Aligned>,
+        rhs: BorrowRoaringishPacked<'_, Aligned>,
+
+        lhs_i: &mut usize,
+        rhs_i: &mut usize,
+
+        packed_result: &mut Box<[MaybeUninit<u64>], Aligned64>,
+        i: &mut usize,
+
+        msb_packed_result: &mut Box<[MaybeUninit<u64>], Aligned64>,
+        j: &mut usize,
+
+        add_to_group: u64,
+        lhs_len: u16,
+        msb_mask: u16,
+        lsb_mask: u16,
+    ) {
+        let simd_msb_mask = Simd::splat(msb_mask as u64);
+        let simd_lsb_mask = Simd::splat(lsb_mask as u64);
+        let simd_add_to_group = Simd::splat(add_to_group);
+
+        let end_lhs = lhs.0.len() / N * N;
+        let end_rhs = rhs.0.len() / N * N;
+        let lhs_packed = unsafe { lhs.0.get_unchecked(..end_lhs) };
+        let rhs_packed = unsafe { rhs.0.get_unchecked(..end_rhs) };
+        assert_eq!(lhs_packed.len() % N, 0);
+        assert_eq!(rhs_packed.len() % N, 0);
+
+        let mut need_to_analyze_msb = false;
+
+        while *lhs_i < lhs_packed.len() && *rhs_i < rhs_packed.len() {
+            let lhs_last = 
+                unsafe { clear_values(*lhs_packed.get_unchecked(*lhs_i + N - 1)) + add_to_group };
+            let rhs_last = unsafe { clear_values(*rhs_packed.get_unchecked(*rhs_i + N - 1)) };
+
+            let (lhs_pack, rhs_pack): (Simd<u64, N>, Simd<u64, N>) = unsafe {
+                let lhs_pack = _mm512_load_epi64(lhs_packed.as_ptr().add(*lhs_i) as *const _);
+                let rhs_pack = _mm512_load_epi64(rhs_packed.as_ptr().add(*rhs_i) as *const _);
+                (lhs_pack.into(), rhs_pack.into())
+            };
+            let lhs_pack = lhs_pack + simd_add_to_group;
+
+            let lhs_doc_id_group = clear_values_simd(lhs_pack);
+
+            let rhs_doc_id_group = clear_values_simd(rhs_pack);
+            let rhs_values = unpack_values_simd(rhs_pack);
+
+            let (lhs_mask, rhs_mask) =
+                unsafe { vp2intersectq(lhs_doc_id_group.into(), rhs_doc_id_group.into()) };
+
+            unsafe {
+                let lhs_pack_compress: Simd<u64, N> =
+                    _mm512_maskz_compress_epi64(lhs_mask, lhs_pack.into()).into();
+                let doc_id_group_compress = clear_values_simd(lhs_pack_compress);
+                let lhs_values_compress = unpack_values_simd(lhs_pack_compress);
+
+                let rhs_values_compress: Simd<u64, N> =
+                    _mm512_maskz_compress_epi64(rhs_mask, rhs_values.into()).into();
+
+                let intersection = 
+                    (lhs_values_compress << (lhs_len as u64)) & rhs_values_compress;
+
+                _mm512_storeu_epi64(
+                    packed_result.as_mut_ptr().add(*i) as *mut _,
+                    (doc_id_group_compress | intersection).into(),
+                );
+
+                *i += lhs_mask.count_ones() as usize;
+            }
+
+            if lhs_last <= rhs_last {
+                unsafe {
+                    analyze_msb(lhs_pack, msb_packed_result, j, simd_msb_mask);
+                }
+                *lhs_i += N;
+            }
+            *rhs_i += N * (rhs_last <= lhs_last) as usize;
+            need_to_analyze_msb = rhs_last < lhs_last;
+        }
+
+        if need_to_analyze_msb && !(*lhs_i < lhs.0.len() && *rhs_i < rhs.0.len()) {
+            unsafe {
+                let lhs_pack: Simd<u64, N> =
+                    _mm512_load_epi64(lhs_packed.as_ptr().add(*lhs_i) as *const _).into();
+                analyze_msb(
+                    lhs_pack + simd_add_to_group,
+                    msb_packed_result,
+                    j,
+                    simd_msb_mask,
+                );
+            };
+        }
+
+        NaiveIntersect::inner_intersect_first_phase(
+            lhs,
+            rhs,
+            lhs_i,
+            rhs_i,
+            packed_result,
+            i,
+            msb_packed_result,
+            j,
+            add_to_group,
+            lhs_len,
+            msb_mask,
+            lsb_mask,
+        );
+    }
+
+    fn intersection_buffer_size(
+        lhs: BorrowRoaringishPacked<'_, Aligned>,
+        rhs: BorrowRoaringishPacked<'_, Aligned>,
+    ) -> usize {
+        lhs.0.len().min(rhs.0.len()) + 1 + N
+    }
+}
+```
+
+It's a lot of code, but it's not hard I swear. It's very similar to the naive version. So let's begin:
+
+Before the main loop begin we initialize the simd version of the needed variables by splatting and also since simd work `N = 8` elements wide we need to cap the lhs and rhs Roaringish Packed vector to the closest multiple of `N`.
+
+Loop over this capped slice, so instead of incrementing by 1 the lhs or rhs index we increment by `N` (similar to the naive version).
+
+* Get the last lhs and rhs document id and group of the current simd vector. This is used in the end of the loop, to check which index we need to increment by `N` (similar to the naive version).
+
+**Note:** There is a very specific reason for this to be at the beginning of the loop and not in the end where they are used. We will get there, just wait.
+
+* Load the `N` elements from lhs and rhs (similar to the naive version).
+
+**Note:** If you know your simd instrinsics you will notice that this is an aligned load. Doing aligned loads is considarably faster, that's why we want things to be 64 byte aligned, to get a speedup in here.  I know that using the unaligned version will lead to the same performance if the address happens to be aligned, but I want to be 100% sure that we are doing aligned loads, because if not something went wrong and I prefer to crash the program if this happens.
+
+* Add to the group of the lhs vector and get the document id and group from lhs and rhs, we also get the values from rhs (similar to the naive version).
+
+* Intersect the lhs and rhs document id and group (similar to the naive version) using the beautiful Vp2intersect and get their respective masks back.
+
+**Note:** Since all document ids and groups in lhs/rhs are different (increasing order) we know that the number of bits set in each mask is the same.
+
+* Use the lhs mask to compress the lhs packed (fill with 0 the rest), get the document id and group from this compressed version, also gets the values.
+
+**Note:** It's faster to do a Compress followed by 2 `ands` than do one aditional `and` in the beginning to get the values from the packed version and do 2 Compress one for the document id and group and other for the values.
+
+* Compress the rhs values using the rhs mask.
+
+**Note:** At this point we know that the values of the document id and groups that are in the intersection are one next to each other in the simd lines.
+
+* Calculate the intersection of the lhs and rhs values (similar to the naive version).
+
+* Store the or between `doc_id_group_compress` (this comes from lhs) and `intersection` into `packed_result` (similar to the naive version).
+
+**Note:** I could find a way to eliminated this unaligned store unfortunatly. From what I measured with perf this is now one of the big bottlenecks of this loop.
+
+* Increment `i` (similar to the naive version) (length of `packed_result`) by the number of document ids and groups that were in the intersection and have their values intersection computed (this will generate a popcount).
+
+**Note:** That's why I said that allowing the values intersection to be 0 makes our life easier, if not we would need to check which values in `intersection` vector are greater than 0 and do one more Compress operation, not good... Checking this during the merge phase is faster and cleaner IMHO.
+
+* Do a branchless increment of the rhs index, but we need to do a a branch to analyze the values from lhs that have MSB's set.
+
+**Note:** Doing a branch here is fine is very predictable, we could remove this branch a do a branchless version, but it's slower I tested.
+
+* And the values from lhs with the `msb_mask` and get a mask of which values have the MSB's set.
+
+* Add one to the lhs document id and group from lhs (similar to the naive version).
+
+* Store to `msb_packed_result` the lanes that have the MSB's set using the mask, by doing a Compress + Store.
+
+**Note:** That's where I measured the poor performance of Compress Store in my use case, changing here to Compress + Store made things faster.
+
+* Increment `j` by the number of elements written to `msb_packed_result` (this will generate a popcount).
+
+After the loop ends by incrementing rhs index and we are still in bounds for the non capped slice we need to do one last analysis on the lhs values MSB's. Because if not we might skip one potential candidate for the second phase.
+
+Similar to every simd algo we need to finish it of by doing a scalar version, so we reuse the naive version by calling it.
+
+**Note:** This will be very fast, since at this point there is 7 or less elements in lhs or rhs.
+
+I hope all of this made sense, it's very similar to the naive version in various points. The only exoteric things we need to do are related to Vp2intersect and Compress/Compress Store/Compress + Store.
+
+Here is a diagram of one iteration of the loop, I hope this helps.
