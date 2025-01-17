@@ -1274,6 +1274,8 @@ And this is the entirety of the intersection process, first and second phase. Ea
 
 **Note:** Having this approach of computing the mask and having an arbitrary value for the lhs token length solves the other problem discussed in the original article. Slop problem (yes it's called slop).
 
+**Note:** You might have noticed a lot of unsafe `get_unchecked` operations, in this case the compiler would probably be able to remove the bounds check, but I want to be sure, that's why I'm doing it.
+
 {% details **Code** for the naive intersection merged into a single function **(you can ignore if you want)** %}
 ```rust
     // ...
