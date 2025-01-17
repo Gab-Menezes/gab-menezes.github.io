@@ -1353,3 +1353,119 @@ And this is the entirety of the intersection process, first and second phase. Ea
     // ...
 ```
 {% enddetails %}
+
+And let the unholy simd begin...
+
+## I hope you have a favorite AVX-512 instruction
+It's a me thing or everyone has a favorite simd instruction ? Let me introduce you to my favorite AVX-512 instruction.
+
+### All hail the king (or queen IDK) VP2INTERSSECT
+By the name you might guess what this instruction does, right ? And if I had to guess you probably didn't knew that this instruction existed.
+
+Why ? You might ask, because sadly this is a deprecated instruction by Intel. If you are a chip engineer at AMD or Intel please don't deprecate this instruction, it has it's use cases, trust me. Imagine when you guys release a new CPU and someone creates a benchmark that uses this instruction, wouldn't your CPU look beatiful when compared to the competition ?
+
+I'm serious don't deprecate this instruction...
+
+Ok, so how does this instruction works ? In our case we are intrested in the 64 bit - 8 wide version, so here is the assembly for it:
+```asm
+vp2intersectq k2, zmm0, zmm1
+```
+
+The fun thing about this little fella is that differently from other instruction it generates two mask, so it will clobber on additional register that is not specified in the operands, in this case is `k3` (`kn+1`).
+
+**Note:** `k` registers are mask register.
+
+So let's do an example to fully grasp the power of this instruction:
+```
+zmm0:      0 | 0 | 3 | 2 | 3 | 8 | 9 | 1
+zmm1:      9 | 5 | 3 | 0 | 7 | 7 | 7 | 7
+-----------------------------------------
+k2 (zmm0): 1 | 1 | 1 | 0 | 1 | 0 | 1 | 0
+k3 (zmm1): 1 | 0 | 1 | 1 | 0 | 0 | 0 | 0
+```
+
+What is being computed is the intersection of the register `zmm0` and `zmm1`, but we check every number against every other number. So if the output mask has `1` in the position it means that the value was present somewhere in the other register.
+
+**Note:** Just to be 100% clear, the `k2` mask refers to the `zmm0` register and `k3` to `zmm1`.
+
+Basically a for loop inside a for loop. Here is the Intel intrinsic guide:
+
+![](/assets/2025-01-13-using-the-most-unhinged-avx512-instruction-to-make-the-fastest-phrase-search-algo/vp2intersect.png)
+
+There are several wierd things about this instruction and that's why a lot of people hate it, but that's what makes it charming. But one of it's weird quirks is that it generates two masks, but in 99.9% of the cases when computing the intersection you only want/need one. But in our use case having one mask for each register is essential.
+
+**Wanna know something funny ?**
+
+As far as I know this instruction is only present in two CPU generations:
+* Tiger Lake (11th gen Mobile CPUs)
+* ~~Zen 5~~ (Spoiler)
+
+And coincidendatly my notebook has a 11th gen CPU, lucky... When I started this project I didn't know about this instruction, so it's pure luck.
+
+**Wanna hear another funny thing ?**
+
+This instruction suck on 11th gen... I mean truly meaning in every sense of the word.
+
+![](/assets/2025-01-13-using-the-most-unhinged-avx512-instruction-to-make-the-fastest-phrase-search-algo/uops-info.png)
+
+Table is taken from [uops.info](https://uops.info).
+
+Our nmeunomioc in the first one in the list, let's go through the stats.
+* Latency: 30 cycles
+* Throughput: 15 cycles
+* Uops: 30
+
+If you don't know that much about cpus, trust me this is bad... It's so bad that this gigachad (Guille Díez-Canãs) mande an [emulated version](https://arxiv.org/pdf/2112.06342) that is faster...
+
+So now do you trust me that is bad ?
+
+This emulated version isn't a strict emulation, because as I said earlier in 99.9% of use cases you only need one mask. So when emulated for generating a single mask this instruction can be made faster, by using another instructions!!!!
+
+Here is the [compiler explorer link](https://godbolt.org/#z:OYLghAFBqd5QCxAYwPYBMCmBRdBLAF1QCcAaPECAMzwBtMA7AQwFtMQByARg9KtQYEAysib0QXACx8BBAKoBnTAAUAHpwAMvAFYTStJg1DEArgoKkl9ZATwDKjdAGFUtEywYhJANlKOAMngMmABy7gBGmMQgAEwapAAOqAqEdgwubh5evkkptgKBwWEskdFxlpjW%2BQxCBEzEBBnunj4VVWm19QSFoRFRsfHmXU1ZrUMNPcWlAwCUlqgmxMjsHACkMQDMYGCrAKwAQlSYTASLmBDm6PXICAD6qgAc3rdMAG6qu1wxM3sAIqsaACCAMBZkwAGpLiAQNckCBHs9vJJoasAOz7EHgrHg24sFifGIvWh4YAMYi3TAJPAbGKkHF4gm3ZAsBKYACOFKpSNxTAUAGs6Zjsbj8V9bgoECYqFR6JzqbScQBZRW3ZTYABKKv2gN%2BTjpt1xBLwILR/w2GKBJs2e32DFQPKM9D%2BIISJnC4JMDAUTCO4KoDEhQWAspYvL5t1eCRiQQIUSUNjZECYIBxhq%2BeDp4RTBtF0Zm4IAtKsNtgPQ9wWiLYDseD6ARwUwuBWNr96bmiSSyXKaUm6Uw6ZIfuahVi6w2Ys3WyLGWJO%2BTKfLew26Q8h1Wa2OmBtJ22Z8TSfOqT3%2B8vwV81yagRvMPXwk3i1OGWKJVKZZhuzEIOF9crVRqtTqTgXpaV7YmOLAaBoO7TmKzKshyC7cqG/JLuEwHVmBN7ghB94trusEsuycpIWGqFcOh171iwXBQQ%2B%2BGEnBRGIZIPIoY2mYUZhVFcLhj7toxCFcixyF8kmXCZuRxbrlx2FxNBT4MYRgl4CRbEKmhUkjrWWEsDEvH0UySnEcJpFMOpknDqBo46RstF4TBinwcZrGiVuHGaVZ2lURs%2BkOYZTnMS5SYbBJ6FaeBYZ2a2EEaFpNZok42EaFwcXYgl4IQNRtGool1HkQAdMQqB1LGtz0FQBAQN8qVYulmVyelukFUVJXvuVlWDjVFY5RlLC2d1uU%2BTMhXFScbWYBVEDeGFnkibFlqov8IHAtaBx2g6waYM6QKuu6nrer6/qQgQxB4DYEZRjGcaYAmSbZmm0aZvduZ4PmRYlhlJgPHSX35pW4VYY28ntrOB4fkuJ6dZZGHWfWZnA3uc7gyeJ6rh5MNeQ2250X5oNdgux59nS57owDt6%2BQp4qStKsoE5%2B35Kiqaqarc2q6jNGPgZBCMEQFQlBSeGnQ5RSUU/xRmBSJZGcbD2E0TzjlMfzUvseCQvSbLeUK/5SsqSZbHiWrFka5julRQZAnOSr6ky6bena5bkumeZtvgf1OOU47yumSFauuzZYuMl7esC77d4cyLc07jFXWNclsc9Zl8uNTxw0tWNZUTZV1WefFidmwNsnNaNpXtRAnW52l%2Bfuz1fXF61meTdNpOeVz0fcyn2W5Q1te2ejkf6Thhda419uNT5/cySJg9dxlEAaB8uwVjE3hy39GxOMWiXkYXUDUc22DFqWO/rKvC%2B7LsEfYplkV0tPPwLb8HBzLQnC7LwngcFopCoJw6pmPWBQCwlgQnWD5XgBBNDPzmHyEAux4ivw4JID%2BUCf6cF4AoEA8RIFf2fqQOAsAkBoBZHQKI5BKDEKpPQaIDASQIAILQAAnnwOgsZiCYK/Kg8IQR6iMM4DwUg3DmDEEYQAeXCNoG6OCBHELYIIURDAmGoKwOEEwwAnBiFoJg7gvAsChkdCsb%2B%2BBiBSLwK8TA2jv6YFUDdEwsZ%2BG8Cuog7%2BxJwjEF4S4LAqCTp4BYA40g5jiDhGSJgX4mB9HBiDFAuYMomDAAUAANTwJgAA7qI1kn8BH8EECIMQ7ApAyEEIoFQ6hcGkF0OJAwRgQCmHMPoPA4RMGQDmKgBI1RtEFkSq0ggBZ6DmNoA%2BbcnTwR1GIMAG8BZkCugfLYcZxADB8kwLwVAgTTpYCaRAOYVhTH2AgI4EYngNgAE4/AMHQJMPo0QuCokSMkVIAgDkgGObcvIaQLklH6NctoOyaijMaK4ZoTyTnbJsB0P57zphfPGP8zIhzgXgqCL0D5VzURbOAcsCQL834oLKb/Dg4JakEGQOCWhwB6FMIyrgQgJBl5DQgdEmBcCEGcGQaQT%2B388UYKwaQHBWgZhYo4DEHFHL0E8oZQEuMaQvBAA%3D%3D%3D) for both of them if you are intrested.
+
+Here is the throughput predicted by [uiCA](https://uica.uops.info/) for each version:
+* Native version
+![](/assets/2025-01-13-using-the-most-unhinged-avx512-instruction-to-make-the-fastest-phrase-search-algo/uica-vp2intersect.png)
+
+* Single mask emulation
+![](/assets/2025-01-13-using-the-most-unhinged-avx512-instruction-to-make-the-fastest-phrase-search-algo/uica-emulation.png)
+
+* Strict emulation
+![](/assets/2025-01-13-using-the-most-unhinged-avx512-instruction-to-make-the-fastest-phrase-search-algo/uica-strict.png)
+
+As you can see the author of the paper is not lying... So yeah it's bad...
+
+Even though it sucks, nothing else on this CPU can compute the intersection of two vectors faster, so it's still the fastest way to get what we want.
+
+**If you haven't laughed in the last two sections, now I will make you cry while laughing**
+
+It wasn't enough for me to get lucky and have a chip that is capable of using this (rare) instruction. Our lord and saviour AMD had to release the second CPU lineup (Zen 5) in the world that supports this instruction, while I was developing this project. 
+
+So luck is definitely on my side.
+
+I didn't pay much attention to it, but when I read this [article](http://www.numberworld.org/blogs/2024_8_7_zen5_avx512_teardown/) I could hold my wallet anymore and had to get a Zen 5 chip:
+
+```
+So just as Intel kills off VP2INTERSECT, AMD shows up with it. Needless to say, Zen5 had 
+probably already taped out by the time Intel deprecated the instruction. So VP2INTERSECT 
+made it into Zen5's design and wasn't going to be removed.
+
+But how good is AMD's implementation? Let's look at AIDA64's dumps for Granite Ridge:
+
+AVX512VL_VP2INTERSE :VP2INTERSECTD k1+1, xmm, xmm L: [diff. reg. set] T: 0.23ns= 1.00c
+AVX512VL_VP2INTERSE :VP2INTERSECTD k1+1, ymm, ymm L: [diff. reg. set] T: 0.23ns= 1.00c
+AVX512_VP2INTERSECT :VP2INTERSECTD k1+1, zmm, zmm L: [diff. reg. set] T: 0.23ns= 1.00c
+AVX512VL_VP2INTERSE :VP2INTERSECTQ k1+1, xmm, xmm L: [diff. reg. set] T: 0.23ns= 1.00c
+AVX512VL_VP2INTERSE :VP2INTERSECTQ k1+1, ymm, ymm L: [diff. reg. set] T: 0.23ns= 1.00c
+AVX512_VP2INTERSECT :VP2INTERSECTQ k1+1, zmm, zmm L: [diff. reg. set] T: 0.23ns= 1.00c
+
+Yes, that's right. 1 cycle throughput. ONE cycle. I can't... I just can't...
+```
+
+You read this right, this beauty is 15x faster on AMD... 15 f* times. WOW...
+
+So yeah I got a Zen 5 chip... Capitalism wins again.
+
+Don't let reviewers tell you that this generation is bad, that the 9700x is a bad chip and so on... If you need a AVX-512 compatible CPU go get yourself a Zen 5 chip, they are monstrous.
+
+Just to be 100% that chip engineers understood my message, **DON'T KILL THIS INSTRUCTION !!!**
