@@ -1,6 +1,7 @@
 ---
 layout: base
 ---
+<div id="toc"></div>
 <article class="post h-entry" itemscope itemtype="http://schema.org/BlogPosting">
   <script src="https://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML" type="text/javascript"></script>
   <header class="post-header">
@@ -36,3 +37,17 @@ layout: base
 
   <a class="u-url" href="{{ page.url | relative_url }}" hidden></a>
 </article>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tocbot/4.32.2/tocbot.min.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  tocbot.init({
+    tocSelector: '#toc',             // Selector for the table of contents container
+    contentSelector: '.post-content',        // Selector for the content to generate TOC from
+    headingSelector: 'h1, h2, h3',   // Specify which headings to include in the TOC
+    hasInnerContainers: true,        // Handle nested headings
+    collapseDepth: 3,                // Depth to which TOC should collapse
+    orderedList: true,                // Use an ordered list for the TOC
+    disableTocScrollSync: true
+  });
+});
+</script>
