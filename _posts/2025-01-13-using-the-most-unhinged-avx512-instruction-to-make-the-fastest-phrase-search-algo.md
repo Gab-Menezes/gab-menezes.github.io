@@ -1356,11 +1356,10 @@ And this is the entirety of the intersection process, first and second phase. Ea
 
 And let the unholy simd begin...
 
-## I hope you have a favorite AVX-512 instruction
+## All hail the king (or queen IDK) VP2INTERSSECT
 It's a me thing or everyone has a favorite simd instruction ? Let me introduce you to my favorite AVX-512 instruction.
 
-### All hail the king (or queen IDK) VP2INTERSSECT
-By the name you might guess what this instruction does, right ? And if I had to guess you probably didn't knew that this instruction existed.
+By the name you might guess what it does, right ? And if I had to guess you probably didn't knew that this instruction existed.
 
 Why ? You might ask, because sadly this is a deprecated instruction by Intel. If you are a chip engineer at AMD or Intel please don't deprecate this instruction, it has it's use cases, trust me. Imagine when you guys release a new CPU and someone creates a benchmark that uses this instruction, wouldn't your CPU look beatiful when compared to the competition ?
 
