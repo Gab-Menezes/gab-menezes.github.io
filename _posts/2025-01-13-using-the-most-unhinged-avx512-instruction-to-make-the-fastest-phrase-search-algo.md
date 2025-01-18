@@ -1499,7 +1499,7 @@ With this we are ready to understand the simd version.
 ## Simd Intersection
 Similar to the naive version I will split each phase and we will analyze them separately (there will be a diagram at the end showing how things work with a drawing).
 
-**Note:** That's is the place where I spent the most time, I easly rewrote this 20 time trying to save every cycle possible.
+**Note:** That's is the place where I spent the most time, I easly rewrote this 20 times trying to save every cycle possible.
 
 ### First Phase
 ```rust
@@ -1965,4 +1965,175 @@ There is a few noticible differences:
 
 And that's it, that's how you implement a intersection using AVX-512.
 
+{% details **Code** for the simd intersection merged into a single function **(you can ignore if you want)** %}
+```rust
+#[inline(always)]
+fn inner_intersect<const FIRST: bool>(
+    lhs: BorrowRoaringishPacked<'_, Aligned>,
+    rhs: BorrowRoaringishPacked<'_, Aligned>,
+
+    lhs_i: &mut usize,
+    rhs_i: &mut usize,
+
+    packed_result: &mut Box<[MaybeUninit<u64>], Aligned64>,
+    i: &mut usize,
+
+    msb_packed_result: &mut Box<[MaybeUninit<u64>], Aligned64>,
+    j: &mut usize,
+
+    add_to_group: u64,
+    lhs_len: u16,
+    msb_mask: u16,
+    lsb_mask: u16,
+) {
+    let simd_msb_mask = Simd::splat(msb_mask as u64);
+    let simd_lsb_mask = Simd::splat(lsb_mask as u64);
+    let simd_add_to_group = Simd::splat(add_to_group);
+
+    let end_lhs = lhs.0.len() / N * N;
+    let end_rhs = rhs.0.len() / N * N;
+    let lhs_packed = unsafe { lhs.0.get_unchecked(..end_lhs) };
+    let rhs_packed = unsafe { rhs.0.get_unchecked(..end_rhs) };
+    assert_eq!(lhs_packed.len() % N, 0);
+    assert_eq!(rhs_packed.len() % N, 0);
+
+    let mut need_to_analyze_msb = false;
+
+    while *lhs_i < lhs_packed.len() && *rhs_i < rhs_packed.len() {
+        let lhs_last = unsafe {
+            clear_values(*lhs_packed.get_unchecked(*lhs_i + N - 1))
+                + if FIRST { add_to_group } else { 0 }
+        };
+        let rhs_last = unsafe { clear_values(*rhs_packed.get_unchecked(*rhs_i + N - 1)) };
+
+        let (lhs_pack, rhs_pack): (Simd<u64, N>, Simd<u64, N>) = unsafe {
+            let lhs_pack = _mm512_load_epi64(lhs_packed.as_ptr().add(*lhs_i) as *const _);
+            let rhs_pack = _mm512_load_epi64(rhs_packed.as_ptr().add(*rhs_i) as *const _);
+            (lhs_pack.into(), rhs_pack.into())
+        };
+        let lhs_pack = if FIRST {
+            lhs_pack + simd_add_to_group
+        } else {
+            lhs_pack
+        };
+
+        let lhs_doc_id_group = clear_values_simd(lhs_pack);
+
+        let rhs_doc_id_group = clear_values_simd(rhs_pack);
+        let rhs_values = unpack_values_simd(rhs_pack);
+
+        let (lhs_mask, rhs_mask) =
+            unsafe { vp2intersectq(lhs_doc_id_group.into(), rhs_doc_id_group.into()) };
+
+        if FIRST || lhs_mask > 0 {
+            unsafe {
+                let lhs_pack_compress: Simd<u64, N> =
+                    _mm512_maskz_compress_epi64(lhs_mask, lhs_pack.into()).into();
+                let doc_id_group_compress = clear_values_simd(lhs_pack_compress);
+                let lhs_values_compress = unpack_values_simd(lhs_pack_compress);
+
+                let rhs_values_compress: Simd<u64, N> =
+                    _mm512_maskz_compress_epi64(rhs_mask, rhs_values.into()).into();
+
+                let intersection = if FIRST {
+                    (lhs_values_compress << (lhs_len as u64)) & rhs_values_compress
+                } else {
+                    rotl_u16(lhs_values_compress, lhs_len as u64)
+                        & simd_lsb_mask
+                        & rhs_values_compress
+                };
+
+                _mm512_storeu_epi64(
+                    packed_result.as_mut_ptr().add(*i) as *mut _,
+                    (doc_id_group_compress | intersection).into(),
+                );
+
+                *i += lhs_mask.count_ones() as usize;
+            }
+        }
+
+        if FIRST {
+            if lhs_last <= rhs_last {
+                unsafe {
+                    analyze_msb(lhs_pack, msb_packed_result, j, simd_msb_mask);
+                }
+                *lhs_i += N;
+            }
+        } else {
+            *lhs_i += N * (lhs_last <= rhs_last) as usize;
+        }
+        *rhs_i += N * (rhs_last <= lhs_last) as usize;
+        need_to_analyze_msb = rhs_last < lhs_last;
+    }
+
+    if FIRST && need_to_analyze_msb && !(*lhs_i < lhs.0.len() && *rhs_i < rhs.0.len()) {
+        unsafe {
+            let lhs_pack: Simd<u64, N> =
+                _mm512_load_epi64(lhs_packed.as_ptr().add(*lhs_i) as *const _).into();
+            analyze_msb(
+                lhs_pack + simd_add_to_group,
+                msb_packed_result,
+                j,
+                simd_msb_mask,
+            );
+        };
+    }
+
+    NaiveIntersect::inner_intersect::<FIRST>(
+        lhs,
+        rhs,
+        lhs_i,
+        rhs_i,
+        packed_result,
+        i,
+        msb_packed_result,
+        j,
+        add_to_group,
+        lhs_len,
+        msb_mask,
+        lsb_mask,
+    );
+}
+```
+{% enddetails %}
+
 ### Never trust the compiler
+https://godbolt.org/z/3Y41hrTWs
+
+Do you remember early when I said that there is a very specific reason on why the `lhs_last` and `rhs_last` are loaded in the beginning of the loop, but only used at the end ?
+
+Like any normal and sane person I wrote code like this in:
+```rust
+/// let's say we are in the first phase
+while *lhs_i < lhs.0.len() && *rhs_i < rhs.0.len() {
+    // no human beign would put this at the
+    // beginning of the loop, far away
+    // from where it's being used
+    // let lhs_last =
+    //     unsafe { clear_values(*lhs_packed.get_unchecked(*lhs_i + N - 1)) + add_to_group };
+    // let rhs_last = unsafe { clear_values(*rhs_packed.get_unchecked(*rhs_i + N - 1)) };
+
+    // ...
+
+    // any sane person would put this here
+    // close to where it's used
+    let lhs_last =
+        unsafe { clear_values(*lhs_packed.get_unchecked(*lhs_i + N - 1)) + add_to_group };
+    let rhs_last = unsafe { clear_values(*rhs_packed.get_unchecked(*rhs_i + N - 1)) };
+
+    if lhs_last <= rhs_last {
+        unsafe {
+            analyze_msb(lhs_pack, msb_packed_result, j, simd_msb_mask);
+        }
+        *lhs_i += N;
+    }
+    *rhs_i += N * (rhs_last <= lhs_last) as usize;
+    need_to_analyze_msb = rhs_last < lhs_last;
+}
+```
+
+But here is the sad thing, LLVM is dumb (or too smart IDK). You would hope that the generated assembly would be the same for both cases. I'm literally only moving two lines of code up and down (they are not used anywhere previously in the loop).
+
+So let's take a look and I will let you tell me if they are the same:
+```asm
+```
