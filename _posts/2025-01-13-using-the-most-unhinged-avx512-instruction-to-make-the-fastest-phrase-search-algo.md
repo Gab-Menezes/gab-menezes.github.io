@@ -748,7 +748,7 @@ For the special souce of this blog post (we will get there in the future, bear w
 
 Fixing this isn't hard if we add an additional big file that has all of the Roaringish Packed aligned to 64 byte boundry. So in the LMDB it self we only store a offset and length. But how we align the data ?
 
-This file will be [mmaped](https://man7.org/linux/man-pages/man2/mmap.2.html), so it's guarantee to be page aligned (4k), with this we know the alignment of the base of the file when constructing it, so we just pad some bytes before the begining of the next Roaringish Packed if needed. Easy right ?
+This file will be [mmaped](https://man7.org/linux/man-pages/man2/mmap.2.html), so it's guarantee to be page aligned (4k), with this we know the alignment of the base of the file when constructing it, so we just pad some bytes before the begining of the next Roaringish Packed if needed.
 
 Also another small optimization that I thought it would make a bigger difference is to [madivese](https://man7.org/linux/man-pages/man2/madvise.2.html) the retrieved range as sequential read.
 
@@ -1102,8 +1102,9 @@ And the remainder of this division tells us how much we need to shift the lhs va
 With this we are ready to look at the naive intersection, yay !!
 
 ## Naive Intersection
-To more easily analyze the code of each intersection phase I will separete it two fictitious functions, but in the final code they are in the same function with the const generic flag.
+To more easily analyze the code of each intersection phase I will separate it two fictitious functions, but in the final code they are in the same function with the const generic flag.
 
+### First Phase
 Here is the code for the first intersection phase:
 
 ```rust
@@ -1121,7 +1122,6 @@ pub struct NaiveIntersect;
 impl IntersectSeal for NaiveIntersect {}
 
 impl Intersect for NaiveIntersect {
-    /// Again this is a fictitious in this case FIRST = true
     fn inner_intersect_first_phase(
         lhs: BorrowRoaringishPacked<'_, Aligned>,
         rhs: BorrowRoaringishPacked<'_, Aligned>,
@@ -1209,12 +1209,12 @@ The operation described above of writing to `msb_packed_result` is repeated when
 
 And with that I hope now you know how the first phase of the naive intersection works.
 
+### Second Phase
 Let's analyze the second phase now, it will be easier this time since we already now how phase one works.
 
 ```rust
     //...
 
-    /// Again this is a fictitious in this case FIRST = false
     fn inner_intersect_second_phase(
         lhs: BorrowRoaringishPacked<'_, Aligned>,
         rhs: BorrowRoaringishPacked<'_, Aligned>,
@@ -1271,7 +1271,7 @@ As you can see they are very, very similar (that's why I decided to use the cons
 * The way we compute the values intersection is different. Instead of shifting left, we do a rotate left (shifting where the bits wrap up to the other side), intersect it with the rhs values and clean up with the `lsb_mask`.
 * We don't need to write to `msb_packed_result`.
 
-And this is the entirety of the intersection process, first and second phase. Easy right ?
+And this is the entirety of the intersection process, first and second phase.
 
 **Note:** Having this approach of computing the mask and having an arbitrary value for the lhs token length solves the other problem discussed in the original article. Slop problem (yes it's called slop).
 
@@ -1279,79 +1279,75 @@ And this is the entirety of the intersection process, first and second phase. Ea
 
 {% details **Code** for the naive intersection merged into a single function **(you can ignore if you want)** %}
 ```rust
-    // ...
+fn inner_intersect<const FIRST: bool>(
+    lhs: BorrowRoaringishPacked<'_, Aligned>,
+    rhs: BorrowRoaringishPacked<'_, Aligned>,
 
-    fn inner_intersect<const FIRST: bool>(
-        lhs: BorrowRoaringishPacked<'_, Aligned>,
-        rhs: BorrowRoaringishPacked<'_, Aligned>,
+    lhs_i: &mut usize,
+    rhs_i: &mut usize,
 
-        lhs_i: &mut usize,
-        rhs_i: &mut usize,
+    packed_result: &mut Box<[MaybeUninit<u64>], Aligned64>,
+    i: &mut usize,
 
-        packed_result: &mut Box<[MaybeUninit<u64>], Aligned64>,
-        i: &mut usize,
+    msb_packed_result: &mut Box<[MaybeUninit<u64>], Aligned64>,
+    j: &mut usize,
 
-        msb_packed_result: &mut Box<[MaybeUninit<u64>], Aligned64>,
-        j: &mut usize,
+    add_to_group: u64,
+    lhs_len: u16,
+    msb_mask: u16,
+    lsb_mask: u16,
+) {
+    while *lhs_i < lhs.0.len() && *rhs_i < rhs.0.len() {
+        let lhs_packed =
+            unsafe { *lhs.0.get_unchecked(*lhs_i) } + if FIRST { add_to_group } else { 0 };
+        let lhs_doc_id_group = clear_values(lhs_packed);
+        let lhs_values = unpack_values(lhs_packed);
 
-        add_to_group: u64,
-        lhs_len: u16,
-        msb_mask: u16,
-        lsb_mask: u16,
-    ) {
-        while *lhs_i < lhs.0.len() && *rhs_i < rhs.0.len() {
-            let lhs_packed =
-                unsafe { *lhs.0.get_unchecked(*lhs_i) } + if FIRST { add_to_group } else { 0 };
-            let lhs_doc_id_group = clear_values(lhs_packed);
-            let lhs_values = unpack_values(lhs_packed);
+        let rhs_packed = unsafe { *rhs.0.get_unchecked(*rhs_i) };
+        let rhs_doc_id_group = clear_values(rhs_packed);
+        let rhs_values = unpack_values(rhs_packed);
 
-            let rhs_packed = unsafe { *rhs.0.get_unchecked(*rhs_i) };
-            let rhs_doc_id_group = clear_values(rhs_packed);
-            let rhs_values = unpack_values(rhs_packed);
-
-            match lhs_doc_id_group.cmp(&rhs_doc_id_group) {
-                std::cmp::Ordering::Equal => {
-                    unsafe {
-                        if FIRST {
-                            let intersection = (lhs_values << lhs_len) & rhs_values;
-                            packed_result
-                                .get_unchecked_mut(*i)
-                                .write(lhs_doc_id_group | intersection as u64);
-
-                            msb_packed_result
-                                .get_unchecked_mut(*j)
-                                .write(lhs_packed + ADD_ONE_GROUP);
-
-                            *j += (lhs_values & msb_mask > 0) as usize;
-                        } else {
-                            let intersection =
-                                lhs_values.rotate_left(lhs_len as u32) & lsb_mask & rhs_values;
-                            packed_result
-                                .get_unchecked_mut(*i)
-                                .write(lhs_doc_id_group | intersection as u64);
-                        }
-                    }
-                    *i += 1;
-                    *lhs_i += 1;
-                    *rhs_i += 1;
-                }
-                std::cmp::Ordering::Greater => *rhs_i += 1,
-                std::cmp::Ordering::Less => {
+        match lhs_doc_id_group.cmp(&rhs_doc_id_group) {
+            std::cmp::Ordering::Equal => {
+                unsafe {
                     if FIRST {
-                        unsafe {
-                            msb_packed_result
-                                .get_unchecked_mut(*j)
-                                .write(lhs_packed + ADD_ONE_GROUP);
-                            *j += (lhs_values & msb_mask > 0) as usize;
-                        }
+                        let intersection = (lhs_values << lhs_len) & rhs_values;
+                        packed_result
+                            .get_unchecked_mut(*i)
+                            .write(lhs_doc_id_group | intersection as u64);
+
+                        msb_packed_result
+                            .get_unchecked_mut(*j)
+                            .write(lhs_packed + ADD_ONE_GROUP);
+
+                        *j += (lhs_values & msb_mask > 0) as usize;
+                    } else {
+                        let intersection =
+                            lhs_values.rotate_left(lhs_len as u32) & lsb_mask & rhs_values;
+                        packed_result
+                            .get_unchecked_mut(*i)
+                            .write(lhs_doc_id_group | intersection as u64);
                     }
-                    *lhs_i += 1;
                 }
+                *i += 1;
+                *lhs_i += 1;
+                *rhs_i += 1;
+            }
+            std::cmp::Ordering::Greater => *rhs_i += 1,
+            std::cmp::Ordering::Less => {
+                if FIRST {
+                    unsafe {
+                        msb_packed_result
+                            .get_unchecked_mut(*j)
+                            .write(lhs_packed + ADD_ONE_GROUP);
+                        *j += (lhs_values & msb_mask > 0) as usize;
+                    }
+                }
+                *lhs_i += 1;
             }
         }
     }
-
-    // ...
+}
 ```
 {% enddetails %}
 
@@ -1505,6 +1501,7 @@ Similar to the naive version I will split each phase and we will analyze them se
 
 **Note:** That's is the place where I spent the most time, I easly rewrote this 20 time trying to save every cycle possible.
 
+### First Phase
 ```rust
 const N: usize = 8;
 
@@ -1842,4 +1839,130 @@ rhs_i: rhs_i
 need_to_analyze_msb: false
 ```
 
-And that's one full iteration of the loop, I know it seems like a lot but it's not. There is a bunch of numbers on the screen but most of the operations are very simple, so I hope you can understand it.
+And that's one full iteration of the loop, I know it seems like a lot, but it's not. There is a bunch of numbers on the screen but most of the operations are very simple, so I hope you can understand it.
+
+### Second Phase
+Similar to the naive version analyzing the second phase will be easier, so here is the code:
+
+```rust
+#[inline(always)]
+fn rotl_u16(a: Simd<u64, N>, i: u64) -> Simd<u64, N> {
+    let p0 = a << i;
+    let p1 = a >> (16 - i);
+
+    // we don't need to unpack the values, since
+    // in the next step we already `and` with
+    // with mask where the doc id and group are
+    // zeroed
+    p0 | p1
+}
+
+#[inline(always)]
+fn inner_intersect_second_phase<const FIRST: bool>(
+    lhs: BorrowRoaringishPacked<'_, Aligned>,
+    rhs: BorrowRoaringishPacked<'_, Aligned>,
+
+    lhs_i: &mut usize,
+    rhs_i: &mut usize,
+
+    packed_result: &mut Box<[MaybeUninit<u64>], Aligned64>,
+    i: &mut usize,
+
+    msb_packed_result: &mut Box<[MaybeUninit<u64>], Aligned64>,
+    j: &mut usize,
+
+    add_to_group: u64,
+    lhs_len: u16,
+    msb_mask: u16,
+    lsb_mask: u16,
+) {
+    let simd_msb_mask = Simd::splat(msb_mask as u64);
+    let simd_lsb_mask = Simd::splat(lsb_mask as u64);
+    let simd_add_to_group = Simd::splat(add_to_group);
+
+    let end_lhs = lhs.0.len() / N * N;
+    let end_rhs = rhs.0.len() / N * N;
+    let lhs_packed = unsafe { lhs.0.get_unchecked(..end_lhs) };
+    let rhs_packed = unsafe { rhs.0.get_unchecked(..end_rhs) };
+    assert_eq!(lhs_packed.len() % N, 0);
+    assert_eq!(rhs_packed.len() % N, 0);
+
+    while *lhs_i < lhs_packed.len() && *rhs_i < rhs_packed.len() {
+        let lhs_last = unsafe { clear_values(*lhs_packed.get_unchecked(*lhs_i + N - 1)) };
+        let rhs_last = unsafe { clear_values(*rhs_packed.get_unchecked(*rhs_i + N - 1)) };
+
+        let (lhs_pack, rhs_pack): (Simd<u64, N>, Simd<u64, N>) = unsafe {
+            let lhs_pack = _mm512_load_epi64(lhs_packed.as_ptr().add(*lhs_i) as *const _);
+            let rhs_pack = _mm512_load_epi64(rhs_packed.as_ptr().add(*rhs_i) as *const _);
+            (lhs_pack.into(), rhs_pack.into())
+        };
+
+        let lhs_doc_id_group = clear_values_simd(lhs_pack);
+
+        let rhs_doc_id_group = clear_values_simd(rhs_pack);
+        let rhs_values = unpack_values_simd(rhs_pack);
+
+        let (lhs_mask, rhs_mask) =
+            unsafe { vp2intersectq(lhs_doc_id_group.into(), rhs_doc_id_group.into()) };
+
+        if lhs_mask > 0 {
+            unsafe {
+                let lhs_pack_compress: Simd<u64, N> =
+                    _mm512_maskz_compress_epi64(lhs_mask, lhs_pack.into()).into();
+                let doc_id_group_compress = clear_values_simd(lhs_pack_compress);
+                let lhs_values_compress = unpack_values_simd(lhs_pack_compress);
+
+                let rhs_values_compress: Simd<u64, N> =
+                    _mm512_maskz_compress_epi64(rhs_mask, rhs_values.into()).into();
+
+                let intersection = 
+                    rotl_u16(lhs_values_compress, lhs_len as u64)
+                        & simd_lsb_mask
+                        & rhs_values_compress;
+
+                _mm512_storeu_epi64(
+                    packed_result.as_mut_ptr().add(*i) as *mut _,
+                    (doc_id_group_compress | intersection).into(),
+                );
+
+                *i += lhs_mask.count_ones() as usize;
+            }
+        }
+
+        *lhs_i += N * (lhs_last <= rhs_last) as usize;
+        *rhs_i += N * (rhs_last <= lhs_last) as usize;
+        need_to_analyze_msb = rhs_last < lhs_last;
+    }
+
+    NaiveIntersect::inner_intersect_second_phase(
+        lhs,
+        rhs,
+        lhs_i,
+        rhs_i,
+        packed_result,
+        i,
+        msb_packed_result,
+        j,
+        add_to_group,
+        lhs_len,
+        msb_mask,
+        lsb_mask,
+    );
+}
+```
+
+I hope you can see that the first phase and the second phase are very similar, and also the second phase from the simd version and naive version are also very similar (just like the first phase).
+
+There is a few noticible differences:
+
+* Just like in the naive version we don't need to add the value of `add_to_group` since it has already been done in the firs phase
+* We intersect an `if lhs_mask > 0` to make the code faster, as mentioned earlier.
+* The way the compute the values intersection is very similar to the naive version, rotate to the left, `and` with `lsb_mask` and `rhs_values`
+
+**Note:** If you look closely the `rotl_u16` function recieves u64x8, but we are only intrested in rotating the 16 LSB's (values bits), so that's why I can use something like `_mm512_rol_epi64`.
+
+* In the second phase we don't need to analyze the values that have the MSB's set, so there is no branch, instead we do a brachless increment of `lhs_i`. just like we did with `rhs_i`
+
+And that's it, that's how you implement a intersection using AVX-512.
+
+### Never trust the compiler
