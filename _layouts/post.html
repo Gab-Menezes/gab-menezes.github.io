@@ -43,9 +43,9 @@ document.addEventListener('DOMContentLoaded', function () {
   tocbot.init({
     tocSelector: '#toc',             // Selector for the table of contents container
     contentSelector: '.post-content',        // Selector for the content to generate TOC from
-    headingSelector: 'h1, h2, h3',   // Specify which headings to include in the TOC
+    headingSelector: 'h1, h2, h3, h4',   // Specify which headings to include in the TOC
     hasInnerContainers: true,        // Handle nested headings
-    collapseDepth: 3,                // Depth to which TOC should collapse
+    collapseDepth: 4,                // Depth to which TOC should collapse
     orderedList: true,                // Use an ordered list for the TOC
     disableTocScrollSync: true
   });

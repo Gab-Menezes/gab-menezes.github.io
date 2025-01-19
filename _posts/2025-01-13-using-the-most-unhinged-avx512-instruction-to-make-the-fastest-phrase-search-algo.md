@@ -175,7 +175,7 @@ Most of our time will be spent on step `3`, but step `1` is pretty cool.
 
 {% details **Code** for the main body of the search function **(you can ignore if you want)** %}
 ```rust
-pub fn search<I: Intersect>(
+fn search<I: Intersect>(
     &self,
     q: &str,
     common_tokens: &HashSet<Box<str>>,
@@ -742,7 +742,7 @@ Now let's go through the structure of my reverse index, we have 3 databases, tha
 
 Let's take a look at the signature of the `index` function:
 ```rust
-pub fn index<S, D, I>(&self, docs: I, path: &Path, db_size: usize) -> u32
+fn index<S, D, I>(&self, docs: I, path: &Path, db_size: usize) -> u32
 where
     S: AsRef<str>,
     I: IntoIterator<Item = (S, D)>,
@@ -955,7 +955,7 @@ For you better understanding on how the two intersection phases work, let's star
 The intersection used by the search function is a generic, and the type needs to implement the `Intersect` trait.
 
 ```rust
-pub trait Intersect {
+trait Intersect {
     fn intersect<const FIRST: bool>(
         lhs: BorrowRoaringishPacked<'_, Aligned>,
         rhs: BorrowRoaringishPacked<'_, Aligned>,
@@ -1049,7 +1049,7 @@ Another funny thing you might have noticed is the `Aligned64` type. Like the val
 
 ```rust
 #[derive(Default)]
-pub struct AlignedAllocator<const N: usize>;
+struct AlignedAllocator<const N: usize>;
 unsafe impl<const N: usize> Allocator for AlignedAllocator<N> {
     fn allocate(
         &self,
@@ -1071,7 +1071,7 @@ unsafe impl<const N: usize> Allocator for AlignedAllocator<N> {
     }
 }
 
-pub type Aligned64 = AlignedAllocator<64>;
+type Aligned64 = AlignedAllocator<64>;
 ```
 
 {% details **Explanation** on why I use `Box<[MaybeUninit<T>]` **(you can ignore if you want)** %}
@@ -1120,7 +1120,7 @@ To more easily analyze the code of each intersection phase I will separate it tw
 Here is the code for the first intersection phase:
 
 ```rust
-pub const ADD_ONE_GROUP: u64 = u16::MAX as u64 + 1;
+const ADD_ONE_GROUP: u64 = u16::MAX as u64 + 1;
 
 const fn clear_values(packed: u64) -> u64 {
     packed & !0xFFFF
@@ -1130,7 +1130,7 @@ const fn unpack_values(packed: u64) -> u16 {
     packed as u16
 }
 
-pub struct NaiveIntersect;
+struct NaiveIntersect;
 impl IntersectSeal for NaiveIntersect {}
 
 impl Intersect for NaiveIntersect {
@@ -1571,7 +1571,7 @@ unsafe fn analyze_msb(
     *j += mask.count_ones() as usize;
 }
 
-pub struct SimdIntersect;
+struct SimdIntersect;
 impl IntersectSeal for SimdIntersect {}
 
 impl Intersect for SimdIntersect {
@@ -2175,3 +2175,5 @@ Unfortunatly this leads to horrible performance loss, since it's way faster to d
 I would assume that by loading them at the beginning (before loading the vectors) it removes the possibility or make it harder for the compiler to optimize.
 
 As mentioned: The current version this doesn't suffer from this issue and since the function changed a lot from this version to the current one, only God knows what changed in the LLVM optimization pipeline to avoid this problem. So to be 100% sure that this will not happen in the future when I change the intersection code I will leave it in the beginnig of the loop.
+
+### Assembly analysis
