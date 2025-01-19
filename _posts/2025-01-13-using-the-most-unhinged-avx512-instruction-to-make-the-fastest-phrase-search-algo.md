@@ -298,7 +298,7 @@ fn search<I: Intersect>(
 {% enddetails %}
 <br/>
 
-So you might have noticed that the intersection is composed of two phases, why is that ? There is an annoying issue with Roaringish is due to the edge case where value bits are in the boundry of the group and calculating the intersection would lead to an incorrect result (that's the issue mentioned above). For example:
+So you might have noticed that the intersection is composed of two phases, why is that ? There is an annoying issue with Roaringish is due to the edge case where value bits are in the boundary of the group and calculating the intersection would lead to an incorrect result (that's the issue mentioned above). For example:
 ```
 t_0: Group 0                            t_1: Group 1
      0000000000000000 1000000000000000       0000000000000001 0000000000000001
@@ -760,9 +760,9 @@ This is just one example, imagine if you have things stored in a external db and
 
 So remember a few paragraphs above where I said that the third database saves the token to the Roaringish Packed ? I kinda lied to you, sorry... In reality we have an extra moving part, but not because I want, but I couldn't figure it out how to make heed behave the way I want.
 
-For the special souce of this blog post (we will get there in the future, bear with me) I need that the continous block that represents the Roaringish Packed to be aligned to a 64 byte boundry, but you can't enforce this with LMDB and consequently heed. I really tried, but when you insert things into the DB f* the alignment of the rest of the values, so it doesn't work trying to insert things already aligned.
+For the special souce of this blog post (we will get there in the future, bear with me) I need that the continous block that represents the Roaringish Packed to be aligned to a 64 byte boundary, but you can't enforce this with LMDB and consequently heed. I really tried, but when you insert things into the DB f* the alignment of the rest of the values, so it doesn't work trying to insert things already aligned.
 
-Fixing this isn't hard if we add an additional big file that has all of the Roaringish Packed aligned to 64 byte boundry. So in the LMDB it self we only store a offset and length. But how we align the data ?
+Fixing this isn't hard if we add an additional big file that has all of the Roaringish Packed aligned to 64 byte boundary. So in the LMDB it self we only store a offset and length. But how we align the data ?
 
 This file will be [mmaped](https://man7.org/linux/man-pages/man2/mmap.2.html), so it's guarantee to be page aligned (4k), with this we know the alignment of the base of the file when constructing it, so we just pad some bytes before the begining of the next Roaringish Packed if needed.
 
@@ -946,7 +946,7 @@ loop {
 This leads to another huge win, specially for queries that have a super rare token in the middle of it, this cuts the search space by a lot, making every single subsequent intersection faster.
 
 # Here begins the fun
-Now that the boring stuff is past us, let's start the fun part... Again just as a reminder on how the intersection works: we do two phases of intersection, one for the conventional intersection and other for the bits that would cross the group boundry and in the end we merge this two.
+Now that the boring stuff is past us, let's start the fun part... Again just as a reminder on how the intersection works: we do two phases of intersection, one for the conventional intersection and other for the bits that would cross the group boundary and in the end we merge this two.
 
 In this section we will take a look at assembly, some cool tools to analyze this assembly, Simd (AVX512), differences in microarchitecture of AMD and Intel chips, emulation of instructions and a lot more. So again sorry to bother you with all of the previous stuff, but it was important.
 
@@ -1215,9 +1215,9 @@ If `lhs_doc_id_group == rhs_doc_id_group`
 * This intersection can be 0, we could check with an if or do it branchless, but we can also check this during the merge phase, and that's what I decided to do (this makes our lifes in the Simd version easier).
     * We could do two checks, one here and one in the merge, but there is no need/meaninful speed difference, so it's fine.
 * Write the or between `lhs_doc_id_group` and the `intersection` to `packed_result`.
-* We also do a branchless write only if the bits of lhs value would cross the group boundry when shifting (that's why we have the `msb_mask`), to save the work in the second phase we already add one to the group (the `msb_packed_result` is used in the second intersection phase as the lhs one).
+* We also do a branchless write only if the bits of lhs value would cross the group boundary when shifting (that's why we have the `msb_mask`), to save the work in the second phase we already add one to the group (the `msb_packed_result` is used in the second intersection phase as the lhs one).
 
-The operation described above of writing to `msb_packed_result` is repeated when incrementing lhs index (the reason is that in the second phase we need to analyze all possible cases where the bits would cross the group boundry) (3/3 done).
+The operation described above of writing to `msb_packed_result` is repeated when incrementing lhs index (the reason is that in the second phase we need to analyze all possible cases where the bits would cross the group boundary) (3/3 done).
 
 And with that I hope now you know how the first phase of the naive intersection works.
 
@@ -2177,3 +2177,139 @@ I would assume that by loading them at the beginning (before loading the vectors
 As mentioned: The current version this doesn't suffer from this issue and since the function changed a lot from this version to the current one, only God knows what changed in the LLVM optimization pipeline to avoid this problem. So to be 100% sure that this will not happen in the future when I change the intersection code I will leave it in the beginnig of the loop.
 
 ### Assembly analysis
+Let's take a look at the assembly generated for the hot loop in the first phase.
+
+```asm
+.LBB23_19:
+	mov rdi, qword ptr [rsp + 72]
+	vmovdqa64 zmm8, zmmword ptr [rdi + 8*r14]
+	mov rsi, qword ptr [rdi + 8*r14 + 56]
+	and rsi, rdx
+	add rsi, rbx
+	vpaddq zmm7, zmm8, zmm1
+	vpandq zmm9, zmm7, zmm3
+	.p2align	4, 0x90
+.LBB23_20:
+	vmovdqa64 zmm10, zmmword ptr [r15 + 8*rbp]
+	mov r9, qword ptr [rsp + 48]
+	mov rdi, qword ptr [r15 + 8*rbp + 56]
+	mov r8, r12
+	and rdi, rdx
+	vpandq zmm11, zmm10, zmm4
+	vp2intersectq k2, zmm9, zmm11
+	vpcompressq zmm11 {k2} {z}, zmm7
+	vpandq zmm10, zmm10, zmm5
+	vpcompressq zmm10 {k3} {z}, zmm10
+	vpandq zmm12, zmm11, zmm5
+	vpsllvq zmm12, zmm12, zmm2
+	vpandq zmm10, zmm12, zmm10
+	vpternlogq zmm10, zmm11, zmm4, 248
+	vmovdqu64 zmmword ptr [r9 + 8*r12], zmm10
+	kmovb r12d, k2
+	popcnt r12d, r12d
+	add r12, r8
+	cmp rsi, rdi
+	jbe .LBB23_25
+	add rbp, 8
+	cmp rbp, rcx
+	jb .LBB23_20
+	jmp .LBB23_22
+	.p2align	4, 0x90
+.LBB23_25:
+	vptestmq k1, zmm8, zmm0
+	vpaddq zmm7, zmm7, zmm6
+	mov r8, qword ptr [rsp + 8]
+	add r14, 8
+	vpcompressq zmm7 {k1} {z}, zmm7
+	vmovdqu64 zmmword ptr [r8 + 8*r13], zmm7
+	kmovb r8d, k1
+	popcnt r8d, r8d
+	add r13, r8
+	xor r8d, r8d
+	cmp rdi, rsi
+	setbe r8b
+	lea rbp, [rbp + 8*r8]
+	cmp r14, rax
+	jae .LBB23_27
+	cmp rbp, rcx
+	jb .LBB23_19
+```
+
+Look all of those `zmm` register, sexy right ? Let's run this through uiCA (for Tiger Lake) and see how fast we can theoretically go.
+
+![](/assets/2025-01-13-using-the-most-unhinged-avx512-instruction-to-make-the-fastest-phrase-search-algo/uica-first-phase.png)
+
+**Note:** I know uiCA and tools similar to it like llvm-mca are just a simulation of best case scenario, in the real world this number is way higher, but it's good enough for us to analyze the behaviour of code.
+
+`24 cycles / 8 elements` (`3 cycles / element`) it's pretty decent IMHO and that's for Tiger Lake on Zen 5 this value is probably lower.
+
+Just for fun let's do some napking math and figure it out an approximation for it on my 9700x system. The values were taken from one of the queries that have two tokens after merging.
+
+**Note:** As I said in the disclaimer the time taken is pretty damn consistent between runs.
+
+```
+lhs len: 551280
+rhs len: 3728037
+
+Since this is O(n+m): 551280 + 3728037 = 4279317 elements
+The loop it self runs 534556 times, so we analyze: 534556 × 8 = 4276448 elements
+Difference: 4279317 - 4276448 = 2869 elements (we are going through almost all elements)
+
+CPU runs at 5.4Ghz
+There is 1000000 us in 1 s: 1000000 ÷ 54000000000 = 0.000018519 us/cycle
+
+First phase for this query takes 849.331us (Spoiler): 849.331 / 0.000018519 = 45862681 cycles
+
+45862681 / 4276448 = 10.72 cycles/element
+```
+
+And that's the effect of caches and branch prediction for you. The values in real life will always be higher than the theoretical best scenario. But still, pretty good.
+
+**Note:** Here is a great [article](https://travisdowns.github.io/blog/2019/06/11/speed-limits.html) for you if you wanna go at the speed limit.
+
+### Code alignment
+During the development life cycle sometimes I would make a change somewhere in the code base that wasn't the intersection code and this would impact the performance of things, specially for the second phase.
+
+I would measure a degradation of up to 50%, but why ? The generated assembly is the same and I didn't even change the code. WTF ? And that's when you learn about that the memory addresses of your functions and loops matter.
+
+**Note:** Great [article](https://www.bazhenov.me/posts/2024-02-performance-roulette/#:~:text=Aligning%20code%20can%20result%20in,made%20directly%20within%20the%20code.) about this topic.
+
+So what is the problem ? The generated assembly for the loop in the second phase has 173 bytes and this fits into 3 cache lines (each one of 64 bytes). So depending where the it's place it would cross a cache line and make it use 4 instead of 3, resulting in slower execution.
+
+To analyze this problem I developed a [tool](https://github.com/Gab-Menezes/asm-alignment) that shows you the alignment of code (I couldn't find one online, so...).
+
+Here is the output when the code is unaligned:
+
+![](/assets/2025-01-13-using-the-most-unhinged-avx512-instruction-to-make-the-fastest-phrase-search-algo/unaligned-loop.png)
+
+As you can see we are using 4 cache lines. Fixing this is easy and hard at the same time.
+
+Easy part is that we only need to introduce some `nop`s before the code segment to align it to the beginning of cache line.
+
+The hard thing is that the number of `nop`s will change if the generated code change. So a new compiler version, targeting another cpu/using different features, changing the code will make this number go up and down... 
+
+Also functions are 16 byte aligned by default on the ELF spec, so even if we add the correct number of `nop`s by just recompiling the code after a small change in another part of the source code (far away from the intersection function) can make f* the number of `nop`s.
+
+So that's a unwinnable fight. One way to mitigate the problem with the ELF alignment of function is to align forcefully align them to 64 byte, this can be done by using the flag `-C llvm-args=-align-all-functions=6`. This will ensure that at least the number of `nop`s doesn't change if you modify the code somewhere else (of course you need to `#[inline(never)]` the function).
+
+So with that in mind I compiled all of my code with `-C llvm-args=-align-all-functions=6` and found the number of `nop`s needed in each phase.
+
+```rust
+if FIRST {
+    for _ in 0..26 {
+        unsafe {
+            asm!("nop");
+        }
+    }
+} else {
+    for _ in 0..48 {
+        unsafe {
+            asm!("nop");
+        }
+    }
+}
+```
+
+![](/assets/2025-01-13-using-the-most-unhinged-avx512-instruction-to-make-the-fastest-phrase-search-algo/aligned-loop.png)
+
+And that's the output you wanna see, the begin of the loop on a 64 byte boundary.
