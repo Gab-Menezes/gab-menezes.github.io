@@ -452,6 +452,14 @@ impl RefTokens<'_> {
             },
         )
     }
+
+    fn ref_token_iter(&self) -> impl Iterator<Item = Self> + '_ {
+        (0..self.positions.len())
+        .map(|i| Self {
+            tokens: self.tokens,
+            positions: &self.positions[i..i+1]
+        })
+    }
 }
 
 impl Hash for RefTokens<'_> {
@@ -466,6 +474,7 @@ struct RefTokenLinkedList<'a, 'alloc> {
     next: Option<&'alloc RefTokenLinkedList<'a, 'alloc>>,
 }
 
+#[inline(never)]
 fn merge_and_minimize_tokens<'a, 'b, 'alloc>(
     &self,
     rotxn: &RoTxn,
@@ -475,7 +484,7 @@ fn merge_and_minimize_tokens<'a, 'b, 'alloc>(
 
     bump: &'alloc Bump,
 ) -> (
-    Option<RefTokenLinkedList<'a, 'alloc>>,
+    Vec<RefTokens<'a>>,
     GxHashMap<RefTokens<'a>, BorrowRoaringishPacked<'b, Aligned>>,
 ) {
     #[inline(always)]
@@ -517,6 +526,7 @@ fn merge_and_minimize_tokens<'a, 'b, 'alloc>(
         Some(score)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn inner_merge_and_minimize_tokens<'a, 'b, 'c, 'alloc, D>(
         me: &DB<D>,
         rotxn: &RoTxn,
@@ -628,35 +638,38 @@ fn merge_and_minimize_tokens<'a, 'b, 'alloc>(
         final_score
     }
 
-    if common_tokens.is_empty() {
-        let mut token_to_packed = GxHashMap::with_capacity(tokens.len());
+    #[inline(never)]
+    fn no_common_tokens<'a, 'b, 'alloc, D>(
+        me: &DB<D>,
+        rotxn: &RoTxn,
+        tokens: RefTokens<'a>,
+        mmap: &'b Mmap,
+    ) -> (
+        Vec<RefTokens<'a>>,
+        GxHashMap<RefTokens<'a>, BorrowRoaringishPacked<'b, Aligned>>,
+    )
+    where
+        D: for<'c> Serialize<HighSerializer<AlignedVec, ArenaHandle<'c>, rkyv::rancor::Error>>
+            + Archive
+            + 'static,
+    {
+        let l = tokens.len();
+        let mut token_to_packed = GxHashMap::with_capacity(l);
+        let mut v = Vec::with_capacity(l);
 
-        let (mut rem, token) = tokens.split_at(tokens.len() - 1);
-        match self.get_roaringish_packed(rotxn, token.tokens(), mmap) {
-            Some(packed) => token_to_packed.insert(token, packed),
-            None => return (None, GxHashMap::new()),
-        };
-        let mut r = bump.alloc(RefTokenLinkedList {
-            tokens: token,
-            next: None,
-        });
-
-        let j = rem.len();
-        for _ in 0..j {
-            let (temp_rem, token) = rem.split_at(rem.len() - 1);
-            match self.get_roaringish_packed(rotxn, token.tokens(), mmap) {
+        for token in tokens.ref_token_iter() {
+            match me.get_roaringish_packed(rotxn, token.tokens(), mmap) {
                 Some(packed) => token_to_packed.insert(token, packed),
-                None => return (None, GxHashMap::new()),
+                None => return (Vec::new(), GxHashMap::new()),
             };
-            let temp_r = bump.alloc(RefTokenLinkedList {
-                tokens: token,
-                next: Some(r),
-            });
-            r = temp_r;
-            rem = temp_rem;
+            v.push(token);
         }
 
-        return (Some(*r), token_to_packed);
+        return (v, token_to_packed);
+    }
+
+    if common_tokens.is_empty() {
+        return no_common_tokens(self, rotxn, tokens, mmap);
     }
 
     let len = tokens.reserve_len();
@@ -686,11 +699,14 @@ fn merge_and_minimize_tokens<'a, 'b, 'alloc>(
     };
 
     if score == 0 {
-        return (None, GxHashMap::new());
+        return (Vec::new(), GxHashMap::new());
     }
     match memo_token_to_score_choices.remove(&tokens) {
-        Some((_, choices)) => (Some(*choices), token_to_packed),
-        None => (None, GxHashMap::new()),
+        Some((_, choices)) => {
+            let v = choices.iter().copied().collect();
+            (v, token_to_packed)
+        },
+        None => (Vec::new(), GxHashMap::new()),
     }
 }
 ```
@@ -709,7 +725,7 @@ Also putting things into the same bump allocator allows use to more easily manip
 
 The type `RefTokens` is a type that holds a "list of tokens", but it's just a lie, what we hold is the original string and a list of pairs, begin and end index of each token, we can use this to slice the original string and have the "list of tokens", this is helpful because now the hash function can be implemented around this fact, so in the end we are just hashing a single string. The `'a` lifetime is the lifetime of the original query string.
 
-And finally we have `RefTokenLinkedList` as the output type, in here we are basically creating a liked list of `RefTokens`s which will represent the final merge of the tokens. If you look closely to this type declaration it accepts `'a` and `'alloc` and that's why using a bump allocator makes things easier, the next reference/pointer of the linked list is of type `Option<&'alloc RefTokenLinkedList<'a, 'alloc>>`. So when someone says to you that is hard to make a linked list in Rust now you know that it's not /s.
+And finally we have `RefTokenLinkedList`, we are basically creating a liked list of `RefTokens`s which will represent the final merge of the tokens. If you look closely to this type declaration it accepts `'a` and `'alloc` and that's why using a bump allocator makes things easier, the next reference/pointer of the linked list is of type `Option<&'alloc RefTokenLinkedList<'a, 'alloc>>`. So when someone says to you that is hard to make a linked list in Rust now you know that it's not /s.
 
 I usually go with [AHash](https://github.com/tkaitchuck/ahash) as my hash function in Rust (and for a long time it was used in this function), but this time I decided to experiment [GxHash](https://github.com/ogxd/gxhash) and it was plesantly surprised that it was faster, I will take this easy win.
 
@@ -796,10 +812,6 @@ But in this case we can't be so aggresive as the minimize step, because the scor
 With this in mind be can me a little bit more naive, but still be good enough: start intersecting by the pair that leads to the smallest sum of lengths (we could also start by the token that has the smallest Roaringish Packed length and intersect with the smallest adjecent, but I prefer the first option).
 
 ```rust
-// This collect is almost free when compared with the rest, so don't
-// be bothered by it.
-let final_tokens: Vec<_> = final_tokens.iter().copied().collect();
-
 let mut min = usize::MAX;
 let mut i = usize::MAX;
 for (j, ts) in final_tokens.windows(2).enumerate() {
