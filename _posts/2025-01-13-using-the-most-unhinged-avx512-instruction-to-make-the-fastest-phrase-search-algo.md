@@ -361,14 +361,14 @@ Doing this allows us to reduce the number of intersections done at search time.
 
 This brings us to the next topic that is done only at search time, the **minimization** step.
 
-# Dinamyc Programming in the wild
+# Dynamic Programming in the wild
 Let's use the same example as above, but this time the person searched for `R_1 C_2 C_3 C_4 R_5`. Since we have all possible combinations from the merge phase we can be smart and try to predict which combination of this tokens will take less time to be intersected. 
 
 At search time we can be greedy while merging, but this might not lead to the fastest intersection combination of tokens. In the greedy version we will compute the intersection of `R_1 C_2 C_3`, `C_4 R_5`, but it might be better to compute `R_1`, `C_2 C_3 C_4`, `R_5` or `R_1 C_2`, `C_3 C_4 R_5` and so on...
 
 It's 100% worth spending time here before computing the intersection, I learned this the hard way...
 
-Does this look like some kind of problem to you ? Yes **Dinamyc Programming**, sometimes this problems appear in the wild, so yes Leet Code is not a lie (I don't like Leet Code).
+Does this look like some kind of problem to you ? Yes **Dynamic Programming**, sometimes this problems appear in the wild, so yes Leet Code is not a lie (I don't like Leet Code).
 
 How can we solve this ? First let's list what we need to do:
 * List all possible combinations of tokens (in a smart way)
