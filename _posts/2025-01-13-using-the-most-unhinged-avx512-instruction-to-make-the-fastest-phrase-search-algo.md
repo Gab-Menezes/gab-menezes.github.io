@@ -2782,12 +2782,7 @@ fn get_doc_ids(&self) -> Vec<u32> {
 
 And with that we have all I wanted to talk about. I hope that things made sense.
 
-# Results
-So how this is going to work: I have a list of 53 different queries with different bottleneck. I will run the naive and simd versions and also I'm going to index the same data on Meilisearch and do the same queries and compare all of them. In the end I'm going to group the queries in tables representing their bottlenecks.
-
-**Note:** Just as a disclaimer because this can be confusing. The normalization and tokenization of the text is done with the [unicode-segmentation crate](https://crates.io/crates/unicode-segmentation) and the way it deals with ponctuation is a bit weird. Tokenizing `"google.com"` will result in `["google.com"]`, which is the inverse of what you would expect which is `["google", ".", "com"]`, but tokenizing `"google. com"` will result in `["google", ".", "com"]`. So the case where `https://google` found 0 results and `https://google.com` found in 14 is right.
-
-## About Meilisearch
+# About Meilisearch
 I'm not trying to dunk on Meilisearch, please don't read it like that. The reason why I chose it are because it's knwon for it's good performance, easy of use and my knowledge on how the internals work.
 
 Since Meilisearch is a fully fledge search engine it wouldn't be fair to use the final time, since it's doing a lot more. Like processing my query, json encoding decoding, network (even though I'm running locally)... So to be fair we will cut the time taken by half.
@@ -2802,11 +2797,16 @@ Here are some stats about the Meilisearch index:
 
 ![](/assets/2025-01-13-using-the-most-unhinged-avx512-instruction-to-make-the-fastest-phrase-search-algo/meilisearch-index-size.png)
 
-I have a single index with the contents leading to a total size of almost 300GB (15x write applification, since the original corpus is 20GB).
+I have a single index with the contents leading to a total size of almost 300GB (15x write amplification, since the original corpus is 20GB).
 
 Looking at the size of the database responsible for saving data about phrase search we a whopping **864 million** etries in it.
 
 ![](/assets/2025-01-13-using-the-most-unhinged-avx512-instruction-to-make-the-fastest-phrase-search-algo/meilisearch-mdb-stat.png)
+
+# Results
+So how this is going to work: I have a list of 53 different queries with different bottleneck. I will run the naive and simd versions and also I'm going to index the same data on Meilisearch and do the same queries and compare all of them. In the end I'm going to group the queries in tables representing their bottlenecks.
+
+**Note:** Just as a disclaimer because this can be confusing. The normalization and tokenization of the text is done with the [unicode-segmentation crate](https://crates.io/crates/unicode-segmentation) and the way it deals with ponctuation is a bit weird. Tokenizing `"google.com"` will result in `["google.com"]`, which is the inverse of what you would expect which is `["google", ".", "com"]`, but tokenizing `"google. com"` will result in `["google", ".", "com"]`. So the case where `https://google` found 0 results and `https://google.com` found in 14 is right.
 
 ## Intersection
 
