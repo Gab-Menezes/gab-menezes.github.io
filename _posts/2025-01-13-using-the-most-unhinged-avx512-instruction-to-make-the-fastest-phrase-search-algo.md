@@ -2791,7 +2791,7 @@ I used the latest version of Meilisearch available on nixpkgs (1.11.3) at the ti
 
 AFAIK the Meilisearch implementation of phrase search works by computing the distance from every token to every other tokens ([link 1](https://github.com/meilisearch/meilisearch/blob/c85146524b960cf445a08e6510f33bcd1d8b0a5e/crates/milli/src/index.rs#L128), [link 2](https://github.com/meilisearch/meilisearch/blob/c85146524b960cf445a08e6510f33bcd1d8b0a5e/crates/milli/src/search/new/resolve_query_graph.rs#L187)), which is very time consuming during indexing and takes a lot of disk space. I might completly wrong, but that's what I got looking at the code.
 
-To be fair my version index everything, so I didn't change a single configuration on Meilisearch about [`stop words`](https://www.meilisearch.com/docs/reference/api/settings#stop-words).
+To be fair my version index everything, so I didn't change a single configuration on Meilisearch about [`stop words`](https://www.meilisearch.com/docs/reference/api/settings#stop-words), but I changed the [pagination `maxTotalHits`](https://www.meilisearch.com/docs/reference/api/settings#pagination) to 3.5 million (since there is 3.2 million documents).
 
 Here are some stats about the Meilisearch index:
 
