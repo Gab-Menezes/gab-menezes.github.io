@@ -2384,6 +2384,7 @@ When computing intersections where the number of elements in lhs way smaller tha
 ```rust
 const FIRST_GALLOP_INTERSECT: usize = 650;
 const SECOND_GALLOP_INTERSECT: usize = 120;
+
 //...
 
 let proportion = lhs
@@ -2394,16 +2395,13 @@ let Some(proportion) = proportion else {
     return RoaringishPacked::default();
 };
 if proportion >= FIRST_GALLOP_INTERSECT {
-    let (packed, _) = GallopIntersectFirst::intersect::<true>(lhs, rhs, lhs_len, stats);
+    let (packed, _) = GallopIntersectFirst::intersect::<true>(lhs, rhs, lhs_len);
     let (msb_packed, _) =
-        GallopIntersectFirst::intersect::<false>(lhs, rhs, lhs_len, stats);
-    stats
-        .first_intersect
-        .fetch_add(b.elapsed().as_micros() as u64, Relaxed);
+        GallopIntersectFirst::intersect::<false>(lhs, rhs, lhs_len);
 
-    return Self::merge_results(packed, msb_packed, stats);
+    return Self::merge_results(packed, msb_packed);
 }
-let (packed, msb_packed) = I::intersect::<true>(lhs, rhs, lhs_len, stats);
+let (packed, msb_packed) = I::intersect::<true>(lhs, rhs, lhs_len);
 
 //...
 
@@ -2414,9 +2412,9 @@ let proportion = msb_packed
 let msb_packed = match proportion {
     Some(proportion) => {
         if proportion >= SECOND_GALLOP_INTERSECT {
-            GallopIntersectSecond::intersect::<false>(msb_packed, rhs, lhs_len, stats).0
+            GallopIntersectSecond::intersect::<false>(msb_packed, rhs, lhs_len).0
         } else {
-            I::intersect::<false>(msb_packed, rhs, lhs_len, stats).0
+            I::intersect::<false>(msb_packed, rhs, lhs_len).0
         }
     }
     None => Vec::new_in(Aligned64::default()),
@@ -2585,3 +2583,91 @@ impl Intersect for GallopIntersectSecond {
 <br/>
 
 One funny thing is that when micro benchmarking this functions I found that doing branchless version is faster, but when using in "real world" the branching version is faster. I don't know why and didn't want to investigate...
+
+# Merging the phases
+Not that intresting/anything going on. If you understood the article I hope you can imagine how this would work.
+
+{% details **Code** for the merge **(you can ignore if you want)** %}
+```rust
+fn merge_results(
+    packed: Vec<u64, Aligned64>,
+    msb_packed: Vec<u64, Aligned64>,
+) -> RoaringishPacked {
+    let capacity = packed.len() + msb_packed.len();
+    let mut r_packed = Box::new_uninit_slice_in(capacity, Aligned64::default());
+    let mut r_i = 0;
+    let mut j = 0;
+    for pack in packed.iter().copied() {
+        unsafe {
+            let doc_id_group = clear_values(pack);
+            let values = unpack_values(pack);
+
+            while j < msb_packed.len() {
+                let msb_pack = *msb_packed.get_unchecked(j);
+                let msb_doc_id_group = clear_values(msb_pack);
+                let msb_values = unpack_values(msb_pack);
+                j += 1;
+
+                if msb_doc_id_group >= doc_id_group {
+                    j -= 1;
+                    break;
+                }
+
+                if msb_values > 0 {
+                    r_packed.get_unchecked_mut(r_i).write(msb_pack);
+                    r_i += 1;
+                }
+            }
+
+            let write = values > 0;
+            if write {
+                r_packed.get_unchecked_mut(r_i).write(pack);
+                r_i += 1;
+            }
+
+            {
+                if j >= msb_packed.len() {
+                    continue;
+                }
+
+                let msb_pack = *msb_packed.get_unchecked(j);
+                let msb_doc_id_group = clear_values(msb_pack);
+                let msb_values = unpack_values(msb_pack);
+                j += 1;
+                if msb_doc_id_group != doc_id_group {
+                    j -= 1;
+                    continue;
+                }
+
+                if write {
+                    // in this case no bit was set in the intersection,
+                    // so we can just `or` the new value with the previous one
+                    let r = r_packed.get_unchecked_mut(r_i - 1).assume_init_mut();
+                    *r |= msb_values as u64;
+                } else if msb_values > 0 {
+                    r_packed.get_unchecked_mut(r_i).write(msb_pack);
+                    r_i += 1;
+                }
+            }
+        }
+    }
+
+    for msb_pack in msb_packed.iter().skip(j).copied() {
+        unsafe {
+            let msb_values = unpack_values(msb_pack);
+            if msb_values > 0 {
+                r_packed.get_unchecked_mut(r_i).write(msb_pack);
+                r_i += 1;
+            }
+        }
+    }
+
+    unsafe {
+        let (p_packed, a0) = Box::into_raw_with_allocator(r_packed);
+        let packed = Vec::from_raw_parts_in(p_packed as *mut _, r_i, capacity, a0);
+        RoaringishPacked(packed)
+    }
+}
+```
+{% enddetails %}
+<br/>
