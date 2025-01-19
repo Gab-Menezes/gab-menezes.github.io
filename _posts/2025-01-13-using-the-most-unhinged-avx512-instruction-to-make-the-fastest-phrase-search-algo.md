@@ -1362,6 +1362,7 @@ fn inner_intersect<const FIRST: bool>(
 }
 ```
 {% enddetails %}
+<br/>
 
 And let the unholy simd begin...
 
@@ -2108,6 +2109,7 @@ fn inner_intersect<const FIRST: bool>(
 }
 ```
 {% enddetails %}
+<br/>
 
 ### Never trust the compiler
 What I'm about to tell you doesn't happen in the current version, but it happened in previous one. I swear I'm not going crazy...
@@ -2372,3 +2374,214 @@ fn binary_search(
 }
 ```
 {% enddetails %}
+<br/>
+
+## Gallop Intersection
+And we have come full circle... In the [second article](https://softwaredoug.com/blog/2024/05/05/faster-intersect) Doug described as how using this intersection helped speedup SearchArray. So let's use it for our advantage.
+
+When computing intersections where the number of elements in lhs way smaller than in rhs (or vice-versa) we can use gallop intersection instead of simd intersection and get a significant speedup. In my testing I found that it's worth switching to gallop intersection when one of the sides is 650x bigger than the other in the first phase and 120x in the second phase.
+
+```rust
+const FIRST_GALLOP_INTERSECT: usize = 650;
+const SECOND_GALLOP_INTERSECT: usize = 120;
+//...
+
+let proportion = lhs
+    .len()
+    .max(rhs.len())
+    .checked_div(lhs.len().min(rhs.len()));
+let Some(proportion) = proportion else {
+    return RoaringishPacked::default();
+};
+if proportion >= FIRST_GALLOP_INTERSECT {
+    let (packed, _) = GallopIntersectFirst::intersect::<true>(lhs, rhs, lhs_len, stats);
+    let (msb_packed, _) =
+        GallopIntersectFirst::intersect::<false>(lhs, rhs, lhs_len, stats);
+    stats
+        .first_intersect
+        .fetch_add(b.elapsed().as_micros() as u64, Relaxed);
+
+    return Self::merge_results(packed, msb_packed, stats);
+}
+let (packed, msb_packed) = I::intersect::<true>(lhs, rhs, lhs_len, stats);
+
+//...
+
+let proportion = msb_packed
+    .len()
+    .max(rhs.len())
+    .checked_div(msb_packed.len().min(rhs.len()));
+let msb_packed = match proportion {
+    Some(proportion) => {
+        if proportion >= SECOND_GALLOP_INTERSECT {
+            GallopIntersectSecond::intersect::<false>(msb_packed, rhs, lhs_len, stats).0
+        } else {
+            I::intersect::<false>(msb_packed, rhs, lhs_len, stats).0
+        }
+    }
+    None => Vec::new_in(Aligned64::default()),
+};
+```
+
+The way that the gallop intersection works is different from the naive and simd, since we are skipping elements we can't accumulate all of the elements that have the values MSB's set to use in a second phase. Instead we need to use the original Roaringish Packed and modify the second phase to account for this. So that's why we have `GallopIntersectFirst`, which has two phases and `GallopIntersectSecond` which has only one phase (the second one).
+
+I will not bother you with the details, if you wanna look at how they are implemented here is the code.
+
+{% details **Code** for `GallopIntersectFirst` **(you can ignore if you want)** %}
+```rust
+pub struct GallopIntersectFirst;
+impl Intersect for GallopIntersectFirst {
+    fn inner_intersect<const FIRST: bool>(
+        lhs: BorrowRoaringishPacked<'_, Aligned>,
+        rhs: BorrowRoaringishPacked<'_, Aligned>,
+
+        lhs_i: &mut usize,
+        rhs_i: &mut usize,
+
+        packed_result: &mut Box<[MaybeUninit<u64>], Aligned64>,
+        i: &mut usize,
+
+        _msb_packed_result: &mut Box<[MaybeUninit<u64>], Aligned64>,
+        _j: &mut usize,
+
+        add_to_group: u64,
+        lhs_len: u16,
+        _msb_mask: u16,
+        lsb_mask: u16,
+    ) {
+        while *lhs_i < lhs.len() && *rhs_i < rhs.len() {
+            let mut lhs_delta = 1;
+            let mut rhs_delta = 1;
+
+            while *lhs_i < lhs.len()
+                && clear_values(lhs[*lhs_i]) + add_to_group + if FIRST { 0 } else { ADD_ONE_GROUP }
+                    < clear_values(rhs[*rhs_i])
+            {
+                *lhs_i += lhs_delta;
+                lhs_delta *= 2;
+            }
+            *lhs_i -= lhs_delta / 2;
+
+            while *rhs_i < rhs.len()
+                && clear_values(rhs[*rhs_i])
+                    < unsafe { clear_values(*lhs.get_unchecked(*lhs_i)) }
+                        + add_to_group
+                        + if FIRST { 0 } else { ADD_ONE_GROUP }
+            {
+                *rhs_i += rhs_delta;
+                rhs_delta *= 2;
+            }
+            *rhs_i -= rhs_delta / 2;
+
+            let lhs_packed = unsafe { *lhs.get_unchecked(*lhs_i) }
+                + add_to_group
+                + if FIRST { 0 } else { ADD_ONE_GROUP };
+            let rhs_packed = unsafe { *rhs.get_unchecked(*rhs_i) };
+
+            let lhs_doc_id_group = clear_values(lhs_packed);
+            let rhs_doc_id_group = clear_values(rhs_packed);
+
+            let lhs_values = unpack_values(lhs_packed);
+            let rhs_values = unpack_values(rhs_packed);
+
+            match lhs_doc_id_group.cmp(&rhs_doc_id_group) {
+                std::cmp::Ordering::Less => *lhs_i += 1,
+                std::cmp::Ordering::Greater => *rhs_i += 1,
+                std::cmp::Ordering::Equal => {
+                    let intersection = if FIRST {
+                        (lhs_values << lhs_len) & rhs_values
+                    } else {
+                        lhs_values.rotate_left(lhs_len as u32) & lsb_mask & rhs_values
+                    };
+                    unsafe {
+                        packed_result
+                            .get_unchecked_mut(*i)
+                            .write(lhs_doc_id_group | intersection as u64);
+                    }
+                    *i += (intersection > 0) as usize;
+
+                    *lhs_i += 1;
+                    *rhs_i += 1;
+                }
+            }
+        }
+    }
+}
+```
+{% enddetails %}
+<br/>
+
+{% details **Code** for `GallopIntersectSecond` **(you can ignore if you want)** %}
+```rust
+pub struct GallopIntersectSecond;
+impl Intersect for GallopIntersectSecond {
+    fn inner_intersect<const FIRST: bool>(
+        lhs: BorrowRoaringishPacked<'_, Aligned>,
+        rhs: BorrowRoaringishPacked<'_, Aligned>,
+
+        lhs_i: &mut usize,
+        rhs_i: &mut usize,
+
+        packed_result: &mut Box<[MaybeUninit<u64>], Aligned64>,
+        i: &mut usize,
+
+        _msb_packed_result: &mut Box<[MaybeUninit<u64>], Aligned64>,
+        _j: &mut usize,
+
+        _add_to_group: u64,
+        lhs_len: u16,
+        _msb_mask: u16,
+        lsb_mask: u16,
+    ) {
+        while *lhs_i < lhs.len() && *rhs_i < rhs.len() {
+            let mut lhs_delta = 1;
+            let mut rhs_delta = 1;
+
+            while *lhs_i < lhs.len() && clear_values(lhs[*lhs_i]) < clear_values(rhs[*rhs_i]) {
+                *lhs_i += lhs_delta;
+                lhs_delta *= 2;
+            }
+            *lhs_i -= lhs_delta / 2;
+
+            while *rhs_i < rhs.len()
+                && clear_values(rhs[*rhs_i]) < unsafe { clear_values(*lhs.get_unchecked(*lhs_i)) }
+            {
+                *rhs_i += rhs_delta;
+                rhs_delta *= 2;
+            }
+            *rhs_i -= rhs_delta / 2;
+
+            let lhs_packed = unsafe { *lhs.get_unchecked(*lhs_i) };
+            let rhs_packed = unsafe { *rhs.get_unchecked(*rhs_i) };
+
+            let lhs_doc_id_group = clear_values(lhs_packed);
+            let rhs_doc_id_group = clear_values(rhs_packed);
+
+            let lhs_values = unpack_values(lhs_packed);
+            let rhs_values = unpack_values(rhs_packed);
+
+            match lhs_doc_id_group.cmp(&rhs_doc_id_group) {
+                std::cmp::Ordering::Less => *lhs_i += 1,
+                std::cmp::Ordering::Greater => *rhs_i += 1,
+                std::cmp::Ordering::Equal => {
+                    let intersection =
+                        lhs_values.rotate_left(lhs_len as u32) & lsb_mask & rhs_values;
+                    unsafe {
+                        packed_result
+                            .get_unchecked_mut(*i)
+                            .write(lhs_doc_id_group | intersection as u64);
+                    }
+                    *i += (intersection > 0) as usize;
+
+                    *lhs_i += 1;
+                    *rhs_i += 1;
+                }
+            }
+        }
+    }
+}
+```
+{% enddetails %}
+<br/>
+
+One funny thing is that when micro benchmarking this functions I found that doing branchless version is faster, but when using in "real world" the branching version is faster. I don't know why and didn't want to investigate...
