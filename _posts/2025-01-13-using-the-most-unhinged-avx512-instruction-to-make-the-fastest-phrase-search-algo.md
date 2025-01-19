@@ -2313,3 +2313,62 @@ if FIRST {
 ![](/assets/2025-01-13-using-the-most-unhinged-avx512-instruction-to-make-the-fastest-phrase-search-algo/aligned-loop.png)
 
 And that's the output you wanna see, the begin of the loop on a 64 byte boundary.
+
+# The last optimization ideas
+## Binary Search
+One simple, but effective idea to reduce the number of intersections is to binary search `lhs` or `rhs` depending on which has the smallest first document id by the first document id from the other. Doing so allows us to skip the beginning section of the Roaringish Packed.
+
+This idea is specially effective in scenarios like this:
+
+```
+lhs: 1000000,g_0,v_0 | ...
+rhs: ... (imagine a bunch of elements here) | 1000000,g_1,v_1 | ...
+
+We are going to search by 1000000,0,0
+```
+
+Skipping all of the beginning section of rhs avoids having to compute the intersection of elements that can't be in the final result.
+
+We have to be careful though, for this to work properly we need to search for only the document id, the group and values need to be 0, so we find the first occurrence of this document id, avoiding skipping elements where the value MSB's would cross the group boundary.
+
+Also taking care to align the beginning of the Roaringish Packed to 64 bytes.
+
+{% details **Code** for the binary search **(you can ignore if you want)** %}
+```rust
+fn binary_search(
+    lhs: &mut BorrowRoaringishPacked<'_, Aligned>,
+    rhs: &mut BorrowRoaringishPacked<'_, Aligned>,
+) {
+    let Some(first_lhs) = lhs.0.first() else {
+        return;
+    };
+
+    let Some(first_rhs) = rhs.0.first() else {
+        return;
+    };
+
+    let first_lhs = clear_group_values(*first_lhs);
+    let first_rhs = clear_group_values(*first_rhs);
+
+    match first_lhs.cmp(&first_rhs) {
+        std::cmp::Ordering::Less => {
+            let i = match lhs.0.binary_search_by_key(&first_rhs, |p| clear_values(*p)) {
+                Ok(i) => i,
+                Err(i) => i,
+            };
+            let aligned_i = i / 8 * 8;
+            *lhs = BorrowRoaringishPacked::new_raw(&lhs.0[aligned_i..]);
+        }
+        std::cmp::Ordering::Greater => {
+            let i = match rhs.0.binary_search_by_key(&first_lhs, |p| clear_values(*p)) {
+                Ok(i) => i,
+                Err(i) => i,
+            };
+            let aligned_i = i / 8 * 8;
+            *rhs = BorrowRoaringishPacked::new_raw(&rhs.0[aligned_i..]);
+        }
+        std::cmp::Ordering::Equal => {}
+    }
+}
+```
+{% enddetails %}
