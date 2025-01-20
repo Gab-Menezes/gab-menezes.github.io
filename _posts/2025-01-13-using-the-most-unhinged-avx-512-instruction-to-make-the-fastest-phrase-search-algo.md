@@ -2802,6 +2802,10 @@ Looking at the size of the database responsible for saving data about phrase sea
 
 ![](/assets/2025-01-13-using-the-most-unhinged-avx-512-instruction-to-make-the-fastest-phrase-search-algo/meilisearch-mdb-stat.png)
 
+When compared to my version the index size is only 53GB (of course Meilisearch index needs to be bigger, because it's doing a lot more).
+
+![](/assets/2025-01-13-using-the-most-unhinged-avx-512-instruction-to-make-the-fastest-phrase-search-algo/index-size.png)
+
 # Results
 So how is this going to work: I have a list of 53 different queries with different bottlenecks. I will run the naive and SIMD versions and also index the same data on Meilisearch, search the same queries, and compare all of them. In the end, I will group the queries in tables representing their bottlenecks.
 
