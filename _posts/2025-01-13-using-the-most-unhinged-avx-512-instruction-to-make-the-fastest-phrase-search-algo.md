@@ -1,15 +1,15 @@
 ---
 layout: post
-title: "Using the most unhinged AVX512 instruction to make the fastest phrase search algo"
+title: "Using the most unhinged AVX-512 instruction to make the fastest phrase search algo"
 ---
 
 # Disclaimers before we start
-* For those who don't wanna read/don't care that much here are the [results](#results), I hope after seeing them you are compelled to read. Small **TL;DR:** I wrote a super fast phrase search algo using AVX-512 and achived wins up to 1600x the performance of Meilisearch.
+* For those who don't wanna read/don't care that much here are the [results](#results), I hope after seeing them you are compelled to read. **TL;DR:** I wrote a super fast phrase search algo using AVX-512 and achived wins up to 1600x the performance of Meilisearch.
 * The contents of this blog post are inspired by the wonderful idea of [Doug Turbull](https://softwaredoug.com/) from the series of blog posts about [Roaringish](https://softwaredoug.com/blog/2024/01/21/search-array-phrase-algorithm). In here we will take this ideas to an extreme, from smart algos to raw performance optimization.
 * I highly recommend reading the [Roaringish](https://softwaredoug.com/blog/2024/01/21/search-array-phrase-algorithm) blog post, but if you don't want there will be a recap on how it works.
 * This project it's been almost 7 months in the making, thousands and thousands of line of code have been written an rewritten, so bear with me if I sound crazy. At the moment of writing there is almost 2.7k LOC, but I have commited around 17k LOC (let's take a few thousands because of `.lock` files) (probably at the time of publishing this number has increased), so the project has be rewritten almost 6 times.
 
-![](/assets/2025-01-13-using-the-most-unhinged-avx512-instruction-to-make-the-fastest-phrase-search-algo/loc.png)
+![](/assets/2025-01-13-using-the-most-unhinged-avx-512-instruction-to-make-the-fastest-phrase-search-algo/loc.png)
 
 * At the beginning I wasn't planning on writing a blog post about it, but I invested so much time and the end result is so cool that I think it's worth a blog post.
 * I started writing a first version but didn't like the direction it was going, so I decided to change it and here we are. So my plan is to show the current state of the project and try my best to remember and to explain why things are the way they are, a lot of benchmarking and fine tuning was done so it's almost impossible for me to remember everything. Maybe in some cases I will go back in time to explain the reason certain optimization was chosen and others I might just explain how it works. This post will probably be long, so grab some water/tea/coffee.
@@ -23,7 +23,7 @@ title: "Using the most unhinged AVX512 instruction to make the fastest phrase se
   * We are optimizing for raw latency, the lower the better.
   * I have randomly select a bunch of queries (each with different bottleneck profile) and measured how each change impacted it's performance.
   * I ran each query 20 times to warmup the CPU, after that I ran the same query another 1000 times and collected the time taken as a whole and in each crucial step, with this we have time/iter.
-  * For those who say that that's not a good benchmark and I should have used criterion with statistical analysis and blah blah blah... All I can say is both of my system (spoiler alert) are pretty reproducible (up to 5 us on the whole benchmark, not per iter, per benchmark run !!!) if I run the same benchmark twice. So this is good enough.
+  * For those who say that that's not a good benchmark and I should have used criterion with statistical analysis and blah blah blah... All I can say is both of my system (spoiler alert) are pretty reproducible, up to 10us per iter.
   * The core that I run the code in on my `isolcpus` list (the physical and mt part) and I used `taskset` everytime... Nothing else was running on the system while collecting data.
   * So after the CPU is warm the time in each iteration is pretty damn consistent, so that's why I consider this good enough.
   * The dataset used is the same used by Doug, [MS MARCO](https://microsoft.github.io/msmarco/), containing 3.2M documents, around 22GB of data. It consists of a link, question and a long answer, in this case we only index the answer (so 20/22GB of data) (in the original article only 1M documents were used, but in here we ingest all of it). 
@@ -44,7 +44,7 @@ There is one big difference between this two, searching by keywords is relative 
 So this makes phrase search way more computationally expensive, the convetional algo found in books is very slow, let's take a look at this first and compare with Doug's brilliant idea.
 
 ## How the conventional algo works
-![](/assets/2025-01-13-using-the-most-unhinged-avx512-instruction-to-make-the-fastest-phrase-search-algo/convetional-phrase-search-algo.png)
+![](/assets/2025-01-13-using-the-most-unhinged-avx-512-instruction-to-make-the-fastest-phrase-search-algo/convetional-phrase-search-algo.png)
 
 This algo (taken from Information Retrieval: Implementing and Evaluating Search Engines) analyzes one document at the time, so the `nextPhrase` function needs to called for each document in the intersection of document ids in the index.
 
@@ -168,7 +168,7 @@ Pretty f* cool.
 # How my version works ?
 The idea behind my implementation is kinda similiar, but with a lot of extra steps, here we have a super brief overview on how it all works, later we will explore each step in depth.
 
-![](/assets/2025-01-13-using-the-most-unhinged-avx512-instruction-to-make-the-fastest-phrase-search-algo/diagram0.png)
+![](/assets/2025-01-13-using-the-most-unhinged-avx-512-instruction-to-make-the-fastest-phrase-search-algo/diagram0.png)
 
 Step `1` and `2` are here to help us reduce as much as possible the time spent on step `3`, since it's the most expensive one. So both of them try to be smart and find the best pattern for us to tackle the same problem, by reducing the search space.
 
@@ -416,7 +416,7 @@ Let's do an example on how this works, since in here we just merge tokens withou
 
 For each call of the function we loop over all possible merges of the remaining tokens. So we get the cost for the token `t_0 t_1 t_2` and call the function recursively for `t_3 t_4` and so on. The call graph would look like this:
 
-![](/assets/2025-01-13-using-the-most-unhinged-avx512-instruction-to-make-the-fastest-phrase-search-algo/callstack.png)
+![](/assets/2025-01-13-using-the-most-unhinged-avx-512-instruction-to-make-the-fastest-phrase-search-algo/callstack.png)
 
 As you can see there is a lot of repeated work being done, that's why memoization is needed, also reducing the recursion depth helps. So in the final Rust version I did exacltly that, but trying my best to optimize this, also I needed to respect how the merge of tokens work.
 
@@ -1400,7 +1400,7 @@ What is being computed is the intersection of the register `zmm0` and `zmm1`, bu
 
 Basically a for loop inside a for loop. Here is the Intel intrinsic guide:
 
-![](/assets/2025-01-13-using-the-most-unhinged-avx512-instruction-to-make-the-fastest-phrase-search-algo/vp2intersect.png)
+![](/assets/2025-01-13-using-the-most-unhinged-avx-512-instruction-to-make-the-fastest-phrase-search-algo/vp2intersect.png)
 
 There are several wierd things about this instruction and that's why a lot of people hate it, but that's what makes it charming. But one of it's weird quirks is that it generates two masks, but in 99.9% of the cases when computing the intersection you only want/need one. But in our use case having one mask for each register is essential.
 
@@ -1416,11 +1416,11 @@ And coincidendatly my notebook has a 11th gen CPU, lucky... When I started this 
 
 This instruction suck on 11th gen... I mean truly meaning in every sense of the word.
 
-![](/assets/2025-01-13-using-the-most-unhinged-avx512-instruction-to-make-the-fastest-phrase-search-algo/uops-info.png)
+![](/assets/2025-01-13-using-the-most-unhinged-avx-512-instruction-to-make-the-fastest-phrase-search-algo/uops-info.png)
 
 Table is taken from [uops.info](https://uops.info).
 
-Our nmeunomioc in the first one in the list, let's go through the stats.
+Our nmeunomioc is the first one in the list, let's go through the stats.
 * Latency: 30 cycles
 * Throughput: 15 cycles
 * Uops: 30
@@ -1435,13 +1435,13 @@ Here is the [compiler explorer link](https://godbolt.org/#z:OYLghAFBqd5QCxAYwPYB
 
 Here is the throughput predicted by [uiCA](https://uica.uops.info/) for each version:
 * Native version
-![](/assets/2025-01-13-using-the-most-unhinged-avx512-instruction-to-make-the-fastest-phrase-search-algo/uica-vp2intersect.png)
+![](/assets/2025-01-13-using-the-most-unhinged-avx-512-instruction-to-make-the-fastest-phrase-search-algo/uica-vp2intersect.png)
 
 * Single mask emulation
-![](/assets/2025-01-13-using-the-most-unhinged-avx512-instruction-to-make-the-fastest-phrase-search-algo/uica-emulation.png)
+![](/assets/2025-01-13-using-the-most-unhinged-avx-512-instruction-to-make-the-fastest-phrase-search-algo/uica-emulation.png)
 
 * Strict emulation
-![](/assets/2025-01-13-using-the-most-unhinged-avx512-instruction-to-make-the-fastest-phrase-search-algo/uica-strict.png)
+![](/assets/2025-01-13-using-the-most-unhinged-avx-512-instruction-to-make-the-fastest-phrase-search-algo/uica-strict.png)
 
 As you can see the author of the paper is not lying... So yeah it's bad...
 
@@ -2154,7 +2154,7 @@ The version where the `lhs_last` and `rhs_last` are loaded in the end made the c
 Here is the compiler explorer [link](https://godbolt.org/#z:OYLghAFBqd5QCxAYwPYBMCmBRdBLAF1QCcAaPECAMzwBtMA7AQwFtMQByARg9KtQYEAysib0QXACx8BBAKoBnTAAUAHpwAMvAFYgATKVpMGoYgFcFBUgAdjmAHKt22BulJL6yAngGVG6AGFUWjMWBn1SfwAZPAYHUIAjTGIJADYAdhtUBUIfBiCQsIjrbNyBGLj7ROS0zI9MLzyhAiZiAgLQ8IN6xoFm1oIK%2BJYklK4M9xa2jqLuqcHY4dHagEp3VDNiZHYOAFI9AGYwMF2AVgAhKkwmAk3MCBK2pgT6AH0clnQVs4ARXY0AIL7I4nC5XG53CCWdCtZAIV6qAAcqVeTAAbqpTlw9N9Tn9AcDjmdLtdbsR7mJaKhRERiKjrHhcfigYCLJgANTQkAgXbpc7/AHsoXstgsbkAWSYAE8knIGLFCKQBcLOXhPtzeedkCxrNyhGr0MoBngxAB5Yhudn6z68n5KwEq2FIEBIlGpSTc16vFhYvR4AW23YHfkE1lKTkEdAavmU6nR86x5CkdlYRPJgG0Kk0ki25PWAgpED2ARVTOB4MCtkRqMgFitADWNRAygQxiILB%2BNyYQZDAKrXJATu5rte7vjyuF3p92NeVKY6FemAZ7uTU993qYCnrrzQOvJCgPtMwZkXy%2Bk7Kns9Q8/eeGxiPtgsnLBYG63AC8d6g95gD6e76kq4vu8R4nkuAGPuWvb9pG3JDi6yKjh6IBrjOdYfl%2BP5/uB7o9pW4YDvBI5jihL7rpYJDHv%2BuEVmGHIDh8NYMKEeoGnIsQEHhoZAocxJYMQeBovcPyYFQTBmLQBBMgK1hmAkEbmF47IZngwBxOgGZZjcOYHAEaAMJY7L2CA7IWHg76YEG2BcX2BlMFc7JqtYtBBnpAiGcZpk5BZVnKZm1LacQ7L8EFKlqZgGn%2BdmxCufYvmahOQpUAw7KJjc9z7KkHhUMmRhShsBAmYRUXclE0oFSs7IALS%2BQASr%2BEmcbpA75oWxYMKWLm6cSZiIr8VnJsVWbcpp1LYMQxA6dg7IJQ6KrCmYdkObNT7zfN9AEOy1gzQcPypVFEB5QVAB0YiqQwrxEBA9grMdi0AO7EEw1gQCs3y0ata3ChtnI7XtLUFtyCi0Hg2yvFQk2vk992vLYbQKN6ZgEA8uXlUjx3efcb02V983AsSyBUMAEBYAkZjAKiB7JN47nSXNuNCuSZIpe1nXcnE91QrdqDbiQUKwYOJUgKNyDjZNxDvb2iUM/jFyE8TDCoMjpPk5TShtHkCjY3i0u40zmwpaa9bXSWEm0OzmAw4tcINI26Bc5LuvCoG9MzekzLS4tCj2RyyUptcUXpRAmXZXmgPVtyrXcqzZuub1A3skdSNFQLialWjUlu72uOpgdrWnQjrWvaj%2BXo2damXag123Q9T0vdjH0qi7QLuwGgKyfJBBStYHJhep7p/X550RSLgWuTR1kfW3PEHHxySCfcARUnEyZBNYUp0wCHcKWYSl9xFNkBrxFz8QvEBLwImCr6g6%2Bb9vliKZt5wkJN921deAkmHgCgIEayB265MAHAmDpl8sHPQqQgFMBmhcMwuE8TJhbG2b8nYWiuSBAcbAjtuL6Q8iZMyFlB59SngSY%2BWoiYQCmMATABBwakjuIPfYeh0SYmxGiawfpBDJCUF4Jhm9ZbnFiCDOIEAxD3WlFrfqrIlq%2BxSuwzhBBuENAIAAR1ESZL004/TJgSBo70vpGTVTAb1ZMvVKorRVDBGs8FNSbhYMmYiyFNHoXrH1VuJDPo/RYEjEUm56waD0S%2BPxxDs7fRoSKHxLiuCBJcSE6WdjjjB1dk3PQeh5EcSUV4FR7J6wGCzhoXMWcuCBlSY%2BXGsQIDvmAuSYAlUQFOyFBUqpUNMC1PZAkMpX0CrgL0LkvhvitwaE6WtbpTD6yz1SZVKJwz5o3xpgZB4dxkyK1FMs7ILR/5rGltglkn0IAuKGQM%2BsXBvgElbtxARQjFiiNoOIqUkidaAj9pNAgtBXhmHGOoq0Bo47jGTHFTByYKCmXGJVGqmDvk2l0h8wCRl4p8mlrgza4p8HjEHuMHGYTNp4EHji/Ypx2TikxUKH61gNCD2ga5VyjliWJ3CdYLgFKdqT2mhAcU1VHI7JVGSt2AQtrFLOR7Uhs8LhXJEWIiRm8/bIHoK0V4aIxBmF/LeT4DwmD/wiiZa06A44rjhZgsFvltW6vPAC6aAYEWu1sBq9AM0IGQprAoZyNwIDHA0KoAAYl6j1pyW5CpnsSMVFJbmSqkQCP2i1rXbgVSEZVjE1U2q1T86FeqzWGohca6Ffz9XmrOaEoUUaIrHVEJYV6Fr/VIuCilGV1w6QxqVQoBNdt8HunTdNOBkgs7S0LbazK7I3Weu9eW6eMk5JVscgwOIdIMnEB4cjaWtAEAKBMs/CaqA34f1iMAb%2Bv91UAN0kA146YQbhR1YC6WxAl0rpfuu9%2BrQt07r/vugIh7j3DzPdgSCrtF0I2BZlbxm0CFXwvUu14f6IEAa8uZYD3FuV7oiq8fcjUTL/p8c/VQVKLiShlJgOUComoBA7VZX4b7T0TxmeB1IkGgNfs%2BiwBQCRYbwYXEhySKGINodQBh7qWHpSynlPKAjRHMEkaHmRyQA1pa6DtVRnxNHp4qh/bORgqLALS3o4xlxqmZm0AY2%2Bes2mBTmMtZ48JjFZx6ZcYPbVQNnXI105pvxOyF3hP8LOJdg8f3HQ0MdegDBXrsgAPRGXZAAKn1fmulm03OXoUIPWL3nfOMAC8F%2BwYWIsuc2kpntg8vY%2ByzonJdiXqG0OtggW2EUIDHWOm5n9xm/iNyxeyWLTGbW5ZkQVhLPmSvvIYDbG1VWauuEQ0u%2BrtLNzq1oZgFRiTsvMaS/58xegCX2GTBoLlwoJvU0XDNyALWe0LYC/ioya3nPfvCZBuICGiComYLQKUFlvQMcHmJXTlkPEqnuggOgHJQtKbxbpQrhd5t%2BaOxAvtoWWsA75ftkHyXjORcU%2BEw6oGo3Jlh5s9r3tlomYZk1ub/9B6oT0FeG8OFJAo%2BBzagusMCyvVOuge2f3QOGM3GFytrwNt45%2Bhj%2BsROyIzjnAucnEBedFs3LT4g9P5xM6h3UuLoWOdc4ZpT1r9Z0eo73b63GUEFNfR%2Bkp9A1IwMLmAJNMw20gx7RrXK%2BtcaDSq6jcdDiVcG6I/x6Bu3cWremQYFG%2BVir7eqoJ/WZ3ghXdnc%2BkjzaLWjfIBN68M3GxLe7XZDbutgeEbxt52Hq6buGlRea57zP7X/de5VfbHPLvXqR9xj9VXLiNcIxceY3aBfLEdc1OydJXDZ3KLUYb43eBTfm%2BsLn13TfXhx4T0ni34%2Ba9uwa1LZJC1O%2B47x4X6fw/E%2Bj8wtYfcy6HUmv%2BfFNvK%2B8fE/05%2BXc%2B/fwIxF0pxvQOp9D5H8n%2Bfb0P%2B0rr%2BEpT5eb8H5JpQqEbZpmp/Tt5fSXguLX7fi37YQMifKP5%2BK5TF6xoKAf63TV7K4/4x6oENp76AFH5ZqwpgFW4QFrRQF%2BIwFYT34IGpCi6gZP4tZe4YFf4fYb4/Qzpzp5CDyi5KxvIwqq7/6wEH4oEIx%2Bba4b4672rmYOb6bkEyz2rMGZ4EF36SFSFrTFqbjIzYGQEC4k4UTkhgRnhJJR4b49qIYNSSQ04AaS7S6M4QChas4K6QZHoKEqgkyv477J6qEHi8oTqKJ969AMCYHh7FwKG14b5OF2r8ip5IFbjFobCCCvCXyNry5QY%2BSNZrTNwF4G6gZGCGQ%2B55Y47nBp6yoZ5oGOEh5Fo9ZlYVZM7/YxEhZVTsgnJjZZHrThItYFGbRFFr6lHp4B6VGQ6a7U61F9blYDYjG/pNFpYtFtGL6Hzn5haNH7CxF7Rpbhaq49E7QBA%2B7dHaHpFAbf7CjTFgYxE%2B6bHsgMHiHaG7E%2B5KY9FHGYy0o5HuwcBrDmwcCnC8DhAcBaCkCoAgAuBuCFT/EfGkAQBIBoBYC4CEAkDkCUA0B%2BZOCcA8AyCCAiBiDsBSAYnyBKBqCaA6AgAHCGDGCmAWBWC2CVConnCtKxDuCYCeDzJ%2BCuAzBdCRCuBDBVAjA1DjCZAlA5DzLsnFClDzLcnVBjATA9DzL9DTDBCdARAylNDzASm8lSl1DzAilzADBqnLD8lrAKAbBbA7CEiggkgQjkgPAkAtAvCYAV78KHBEhgj0JWnQhOgIiIQsK%2BiOkgjEjghkjBpaS0j0iMhhr4T0QCwWLCiigSh8a4YCaKjSyMTxjai6ggDapGgaxmgWjJjGruwzJESIQkSaIGLDoeJWLxhpw8gxhRTJi5xZjHrBk5gFlbSAxFimxljuLQQEQCx1jECNiFhILh4dhdg2SVmDhbDOiOLjiuyX5C7UTniX4uK%2BGHiUTGF4B6qXgLk5D3gzKUEYQAF37/jZqXiGFUTgR/Llk9mRnWJTnDjFlOL6FX6rmLnjm9l3lwgPluhPlaIgTrlvkfQTkpkgDMRigZlsQcRLEBonzzxCQQAiRiSNR3xjoPy7ybT7yRTNkxS6SVqeTHEiZAUdZORdRuQGSbT4UvEQqjy0jBQkBibqQ0U6QBCkHr5JQpRpSKLgJZRMk5SJwZwpzWJCxlSlyZzgrTT1QKCNSuQAxtSdmkU9R9Q6yAoRyCzDTCxRRixTRdrLHFEcjRnc70oUoHRJwECnQnoXRXQ3R3QMCPTPQ14nFrQ/Te6p6yVAwgxgwQzfiIZMAwxwwEDN5Iwoz8WiUYzQYOUdHSEirkLEwqwUxbYay0xhpSH6zEAszyUWycxazHQ8wpFS5DRxgaVZhaUSzQVSECLywQCKzKyYBkzxVUyJUGTazMgpU0IGzshGwmwdRmyZW9b9Z2wOyOWLGuw5Gux6XjoNkBRcUhy8VhwpCqVRwdndVljQrEKfohUFSCVwTCUZwI4F6TXIAPAFg05FxrAbVlwWWVzVw2V2X1zK5vH%2Brbxdw9wMURQDw%2B6YVMU4UBATzQVHzRWnzwUXwrzshrwbxhr3wFjoWvVnrL4wXnCA2LzLxXyg03zg2PJbyoVQ1KSrqvx3qfzbo/xPoHwHrAKgIQrcVQIwLnBEYILsjDntioLdi6QYJYLQV4X4KYxEJ/VkKVVUI0J0KWn6Wp5MLelsIcJcHKJ8LhlkJBo3J3IPLMjjV%2Bw96BFzpqJMCBIGI6Ja3YiGLiXXEmKmSIh7VjUflwT3k1kJgKD2LsgzkoRTjBK66wZNaQYHIxJO0dFeKRJ%2BLRIXiO1bhxKuwJKQAF5MKq2ZKqI5J5KagFKtmajFKtylIF5NLVKtJ1IzIqip0tJtIdIF6jKpJ9KTJHJDL51BVjITI4hHJcCZ3ChzKayLLkhrKrLsiKyWBa4zKRFCj7J%2BKHJRK%2BqjXw1y0Sr3JSopQvICGfKa1EEgEkEJzAowptoz0won4QoGVp7uTIqqboqpC0qcG4p2oEpEpe30rko%2B6UrdSA7%2Bgn2bQMpMrEYU3sotFhkdE8q8h8oMrDoXKy0MDCLBoK1j1lG1pDH4Hxo9pAFnqEappWRL2ZpQOmrxR5rdrMYyYOq2ZGDIwDreo%2Bpf27KXK/3XIj2K0CgRp%2B57ogNB72zgPL3QMGpGIZrJqz2r25otyRYHYlo6G4MCiVrSrlEUONrUMdpL0do6WfQ5Z9pYNDqCojrtxjp%2ByxBTpga95zqmGKZXrsi423qbpfxE3MaAIcBHow2SauyxbXprobr3o6O7o2r6OGOYXGO7JqO/rsayaAaYwzJQ4uPUbuN64FrMaWFSVsYyaQboaYbnDYb8b4YmrEZ02YXkbSyUbePQa0YqgaZq4IasaFTBOcbcZ7G8Y4Z4aCbRMiaxMWVvUSbnquzSaoZuPJO%2BPP5%2BaGauxpNaYgpqbfqWZ%2BJNMAim2mabSyGdNbjWYGjoMupyEt5lVNa1YeYPFFY%2Bag6VSpbpYAqRY/QxYzOp5daHaLMhbhYrOZbP7iOp7jVd5ebdYC11EDbVbTNayLE31F5U52xY75Zd5bPjH9WVbXPDaxbtGRYJVTa7aO5w6LaH0nbsjrbjYNUAuJJi7oDbOgurbgtd2F6XaYDXaoC3ZiAPb2kaYvZiBKCTNChfY/YrEs67GHPAtg6732pnHQ4PPpNwsLOiM4ENN3F9HY76V8hAO26Z5VGjF2zHTvOTEDXM4zFrHNGtFvR3Pu4kpdH5FsvHP9HcsVENqOGwuCsXMTH1FqtkvitzGSu/P1PR7XEh6T5Rqt57QnNsUMx5GPP85/kLkP78vi6Fx063Qy58u/rpGK6b0Xi6FOVyt2s%2B7znXjC4mHqsS6nUM6y4s7etK5DUeGmv0vmth3dlGse4Ixb5v4W6DyDHl7xoh4YFDW2v8Ol7kP5sO6FtYHIvGux5eGz4p7W58MVuqpV5hH57LE854G/hlv/z8MV43Fq5FvsEBubQN7IH0st7gHLEd4csFYR1BGqKq5ZveFz5YGT4rsNsYHSvptChWsyudGbSbu75HkHgQPH45rTtmEX7PnQGvlOvN4TuD7x7b5bvVtsEHvGt/4qGnuH5wMr2XtkEzt6Gvh3u/snn0HxHq7P4sHvtYEJtNbKFoGrnnvEHMNXsaHPigdUH3t0GDtMHdvoFwftuEs2vhKS3BG8ET3vKIGEerliHKYhHuFfR9oDOOZbjMfZFKF0e/vqGYfChaGlr%2BvzSX7nkbnuiqP8cWGZM2FIx2HusOFOHeuuG1146eEvvZvWCrn%2BEUfzKhF56qfzQ1tfTRFrGzOPsJFoCLS0KpEBZs4EUHuD24yivnFmep5XHbEKt7GbPyuWDPHQZDW0sXHufpaDs7FUpxG%2BeZz2dUWRYPUQlfE/GkB/EAlAl0nboMCkBglaBvSkAGaSCIjeapAQKpIHAaAACcXA5X6QqQK4XxkgvxRJgJnAvAy6Qy2XEJcAsA0JsBP2ZAFAEAN%2BfXoFqkCAryUofAdAatlAui4JpACQsQrQUoaJvAC3zAxAUopoCQ2gyiK3pAu4bAggpov9y3c3cVAQlIy63AvAWAdYJg4gZ3eA5IjQQkV3AJmAqgDQSMOw6JGSXxAJIMCQT0G3QQWATXBYaoe3QkxACQ2QmAIkd3wAwioA4JawVARgwACgAAangJbKaD3H8eifwJiaIOILicT/iSoOoHN7oAYEYCYCAOYJYIYHgAkMupAGsPXe5JwFVHynMlVPQEJF1D8AcNVHyvzQQFVMgLJFbt4NQsQEYI2LwKgNDwJFgOz1AMwGwCABFGUJl3bpwHoBoHoDwLl9SQ4KiSCYycyXkKyYEAqUUDXdEIsDyfqVkEKXkCKTXYKXr3qXydb8oiqQMF7wH8EXKQsJUJKRIJMMHw7%2BEDXe3W0H72MIacadsPoJ8ZwElyl8r8Ca4Fl0SWsFCSgL1/QP15QEN2XyN8AGN/dpN5JNwjN012t0t3ty3xt1tzt14Htwd4wAQMd/dk1%2Bd5d3t7d%2BSQ9wCfgM994K901x9194ont39014D8D1KKDzsACRD2KNd6QND7D0oAj%2BP1uoX3wBj9j7j/dPjyprvxT1iWT9IBT4oFT017oKSfTxScz4Dxr5z/mJrDz3z3zAC9MAQvK3KL157sgJeUvGXrtDl7JBFemAZXqr2Hy/h4AVVVErr3mR79A8hvY3qbzWDm9HA2vdLgyWVK%2BAIA/gEUgcFOCcl0AyfEAOkG95ilPecfEkjQJ97ikXeUfRgaH1lJalWB1A3gUHyT5cD1SDAhPvwMKDhBBBifCPksBqCMDU%2BmwdPgcEz7fFGuc3NLvSUy4dci%2BSAfAFQBygDc7%2BpPHEo/1kDP9CSc3H9BEB/QGCqAz1dgEMh/QfcCwTALnn8V4CmNSSsWewY4JABDJYsrgp6B4Ja5qDs%2BTXIEhwB%2BB4BDB7IHHpbGSDNZKSyAVuqN3G5i92Q/PQXkyStzVZjo3eOLEzwICpD5QNfDIRAOyEgDchu0fIbwF0FrADMWIY6OVwODpA2hNXcrhoERDG82hhgTgA12S6RCWu7gCIA0P6EcA9AGg1LiMPGHQ8cgvgSQEAA%3D%3D%3D) of an older version of the intersect function (you don't need to understand what is going on, just that in the first version they are loaded in the end and in the second they are loaded at the beginning).
 
 I took a print from diff of the important assembly section (left: loaded in the end | right: loaded at the beginning):
-![](/assets/2025-01-13-using-the-most-unhinged-avx512-instruction-to-make-the-fastest-phrase-search-algo/diff-load-end-begin.png)
+![](/assets/2025-01-13-using-the-most-unhinged-avx-512-instruction-to-make-the-fastest-phrase-search-algo/diff-load-end-begin.png)
 
 I don't have 20/20 vision, but they look different to me...
 
@@ -2240,7 +2240,7 @@ Let's take a look at the assembly generated for the hot loop in the first phase.
 
 Look all of those `zmm` register, sexy right ? Let's run this through uiCA (for Tiger Lake) and see how fast we can theoretically go.
 
-![](/assets/2025-01-13-using-the-most-unhinged-avx512-instruction-to-make-the-fastest-phrase-search-algo/uica-first-phase.png)
+![](/assets/2025-01-13-using-the-most-unhinged-avx-512-instruction-to-make-the-fastest-phrase-search-algo/uica-first-phase.png)
 
 **Note:** I know uiCA and tools similar to it like llvm-mca are just a simulation of best case scenario, in the real world this number is way higher, but it's good enough for us to analyze the behaviour of code.
 
@@ -2283,7 +2283,7 @@ To analyze this problem I developed a [tool](https://github.com/Gab-Menezes/asm-
 
 Here is the output when the code is unaligned:
 
-![](/assets/2025-01-13-using-the-most-unhinged-avx512-instruction-to-make-the-fastest-phrase-search-algo/unaligned-loop.png)
+![](/assets/2025-01-13-using-the-most-unhinged-avx-512-instruction-to-make-the-fastest-phrase-search-algo/unaligned-loop.png)
 
 As you can see we are using 4 cache lines. Fixing this is easy and hard at the same time.
 
@@ -2313,7 +2313,7 @@ if FIRST {
 }
 ```
 
-![](/assets/2025-01-13-using-the-most-unhinged-avx512-instruction-to-make-the-fastest-phrase-search-algo/aligned-loop.png)
+![](/assets/2025-01-13-using-the-most-unhinged-avx-512-instruction-to-make-the-fastest-phrase-search-algo/aligned-loop.png)
 
 And that's the output you wanna see, the begin of the loop on a 64 byte boundary.
 
@@ -2798,13 +2798,13 @@ To be fair my version index everything, so I didn't change a single configuratio
 
 Here are some stats about the Meilisearch index:
 
-![](/assets/2025-01-13-using-the-most-unhinged-avx512-instruction-to-make-the-fastest-phrase-search-algo/meilisearch-index-size.png)
+![](/assets/2025-01-13-using-the-most-unhinged-avx-512-instruction-to-make-the-fastest-phrase-search-algo/meilisearch-index-size.png)
 
 I have a single index with the contents leading to a total size of almost 300GB (15x write amplification, since the original corpus is 20GB).
 
 Looking at the size of the database responsible for saving data about phrase search we a whopping **864 million** etries in it.
 
-![](/assets/2025-01-13-using-the-most-unhinged-avx512-instruction-to-make-the-fastest-phrase-search-algo/meilisearch-mdb-stat.png)
+![](/assets/2025-01-13-using-the-most-unhinged-avx-512-instruction-to-make-the-fastest-phrase-search-algo/meilisearch-mdb-stat.png)
 
 # Results
 So how this is going to work: I have a list of 53 different queries with different bottleneck. I will run the naive and simd versions and also I'm going to index the same data on Meilisearch and search the same queries and compare all of them. In the end I'm going to group the queries in tables representing their bottlenecks.
