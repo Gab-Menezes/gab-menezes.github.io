@@ -4,6 +4,7 @@ title: "Using the most unhinged AVX512 instruction to make the fastest phrase se
 ---
 
 # Disclaimers before we start
+* For those who don't wanna read/don't care that much here are the [results](#results), I hope after seeing them you are compelled to read. Small **TL;DR:** I wrote a super fast phrase search algo using AVX-512 and achived wins up to 1600x the performance of Meilisearch.
 * The contents of this blog post are inspired by the wonderful idea of [Doug Turbull](https://softwaredoug.com/) from the series of blog posts about [Roaringish](https://softwaredoug.com/blog/2024/01/21/search-array-phrase-algorithm). In here we will take this ideas to an extreme, from smart algos to raw performance optimization.
 * I highly recommend reading the [Roaringish](https://softwaredoug.com/blog/2024/01/21/search-array-phrase-algorithm) blog post, but if you don't want there will be a recap on how it works.
 * This project it's been almost 7 months in the making, thousands and thousands of line of code have been written an rewritten, so bear with me if I sound crazy. At the moment of writing there is almost 2.7k LOC, but I have commited around 17k LOC (let's take a few thousands because of `.lock` files) (probably at the time of publishing this number has increased), so the project has be rewritten almost 6 times.
@@ -2806,7 +2807,9 @@ Looking at the size of the database responsible for saving data about phrase sea
 ![](/assets/2025-01-13-using-the-most-unhinged-avx512-instruction-to-make-the-fastest-phrase-search-algo/meilisearch-mdb-stat.png)
 
 # Results
-So how this is going to work: I have a list of 53 different queries with different bottleneck. I will run the naive and simd versions and also I'm going to index the same data on Meilisearch and do the same queries and compare all of them. In the end I'm going to group the queries in tables representing their bottlenecks.
+So how this is going to work: I have a list of 53 different queries with different bottleneck. I will run the naive and simd versions and also I'm going to index the same data on Meilisearch and search the same queries and compare all of them. In the end I'm going to group the queries in tables representing their bottlenecks.
+
+You can hover over queries that are collapsed with ellipsis to see the whole content.
 
 **Note:** Just as a disclaimer because this can be confusing. The normalization and tokenization of the text is done with the [unicode-segmentation crate](https://crates.io/crates/unicode-segmentation) and the way it deals with ponctuation is a bit weird. Tokenizing `"google.com"` will result in `["google.com"]`, which is the inverse of what you would expect which is `["google", ".", "com"]`, but tokenizing `"google. com"` will result in `["google", ".", "com"]`. So the case where `https://google` found 0 results and `https://google.com` found in 14 is right.
 
@@ -2814,7 +2817,9 @@ So how this is going to work: I have a list of 53 different queries with differe
 * The way it deals with ponctuation is different. On my version a ponctuation is like any other token, but for meilisearch it become a space.
 * It also returns documents with subqueries of the searched query, for example the query `may have significant health effects`, returns 3 documents containing this sequence (just like mine), but also returns one aditional document containing `may have significant immunomodulatory effects`.
 
-## Intersection
+## Simd/Naive Intersection
+This are queries mainly bottleneck on computing the intersection using the simd or naive algos. Here is where we are going to see the performance differance between them.
+
 
 {% highlight_lowest_value_in_row %}
 Query | Simd | Naive | Meilisearch | Meilisearch (Original) | Results | Results (Meilisearch) | Performance gain
@@ -2851,7 +2856,8 @@ we hope you had a great time | 0.1882 | 0.8915 | 4.4113 | 5.5141 | 4 | 9 | 23.43
 phrase search | 0.2445 | 1.3501 | 1.6172 | 2.0215 | 9 | 19 | 6.6143x
 {% endhighlight_lowest_value_in_row %}
 
-## Hybrid
+## Simd/Naive + Gallop
+Queries where they are equally bounded by computing the simd/naive intersection and computing the gallop intersection.
 
 {% highlight_lowest_value_in_row %}
 Query | Simd | Naive | Meilisearch | Meilisearch (Original) | Results | Results (Meilisearch) | Performance gain
@@ -2863,7 +2869,8 @@ World War II was fought | 0.0213 | 0.0721 | 3.4111 | 4.2638 | 18 | 23 | 160.1455
 is common in the | 2.5428 | 9.2461 | 6.5425 | 8.1781 | 1549 | 3876 | 2.5730x
 {% endhighlight_lowest_value_in_row %}
 
-## Gallop
+## Gallop Intersection
+This are queries where gallop intersection dominates, so the difference between naive and simd are very close (most of the difference is due to noise).
 
 {% highlight_lowest_value_in_row %}
 Query | Simd | Naive | Meilisearch | Meilisearch (Original) | Results | Results (Meilisearch) | Performance gain
@@ -2876,7 +2883,8 @@ Office 212 Washington StreetSt | 0.0141 | 0.0141 | 0.3149 | 0.3936 | 1 | 1 | 22.
 https://google.com | 0.0086 | 0.0086 | 2.7748 | 3.4684 | 14 | 18 | 322.6512x
 {% endhighlight_lowest_value_in_row %}
 
-## Merge
+## Merge and Minimize
+Very long queries where computing the merge and minimize phase dominates. Since they are so long we will probably find a very specific token making the intersection almost free making the difference between naive and simd almost non existant (most of the difference is due to noise).
 
 {% highlight_lowest_value_in_row %}
 Query | Simd | Naive | Meilisearch | Meilisearch (Original) | Results | Results (Meilisearch) | Performance gain
@@ -2887,6 +2895,7 @@ Science & Mathematics PhysicsThe hot glowing surfaces of stars emit energy in th
 {% endhighlight_lowest_value_in_row %}
 
 ## Single Token
+Queries where during the merge and minimize got combined into a single one, in here we mainly bottleneck on getting the document ids out of the Roaringish Packed, since we don't even compute an intersection the difference between naive and simd are very close (most of the difference is due to noise).
 
 {% highlight_lowest_value_in_row %}
 Query | Simd | Naive | Meilisearch | Meilisearch (Original) | Results | Results (Meilisearch) | Performance gain
@@ -2901,3 +2910,12 @@ you can go | 0.0041 | 0.0045 | 6.6274 | 8.2843 | 16947 | 20754 | 1616.4390x
 do not | 0.1826 | 0.1826 | 1.4025 | 1.7531 | 534453 | 541560 | 7.6807x
 $3,000 | 0.0037 | 0.0039 | 1.6308 | 2.0385 | 12494 | 13006 | 440.7568x
 {% endhighlight_lowest_value_in_row %}
+
+# Final thoughts
+We beated Meilisearch in 49/53 queries and we got from 1.5x up to 1600x performance increase, so if I had to say I'm more than happy with the final results.
+
+Probably with one of two new optimization ideas we could beat Meilisearch in 53/53, but at this point I'm kinda tired of the project/out of ideas.
+
+Also I'm very happy with the performance of the simd algo when compared to the naive version.
+
+I hope you enjoyed the ride. <3
