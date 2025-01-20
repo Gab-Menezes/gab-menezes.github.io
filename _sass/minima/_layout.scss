@@ -250,7 +250,7 @@ a.toc-link {
 
 #toc {
   position: fixed;                /* Fix the TOC to the right side */
-  height: calc(100vh - 2 * ($top-line-height + $spacing-unit)); /* Make the TOC stretch the entire height of the viewport */
+  height: calc(100vh - ($top-line-height + $spacing-unit) - 250px); /* Make the TOC stretch the entire height of the viewport */
   top: $top-line-height + $spacing-unit;   /* Distance from the top of the page */
 
   left: 60px;                    /* Distance from the left side of the page */
