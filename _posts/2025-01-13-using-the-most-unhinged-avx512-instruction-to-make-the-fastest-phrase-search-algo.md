@@ -2785,7 +2785,9 @@ And with that we have all I wanted to talk about. I hope that things made sense.
 # About Meilisearch
 I'm not trying to dunk on Meilisearch, please don't read it like that. The reason why I chose it are because it's knwon for it's good performance, easy of use and my knowledge on how the internals work.
 
-Since Meilisearch is a fully fledge search engine it wouldn't be fair to use the final time, since it's doing a lot more. Like processing my query, json encoding decoding, network (even though I'm running locally)... So to be fair we will cut the time taken by half.
+Since Meilisearch is a fully fledge search engine it wouldn't be fair to use the final time, given it's doing a lot more. Like processing my query, json encoding decoding, network (even though I'm running locally)... So to be fair we will say that the time spent on the query it self is 80% of the total time (i.e 20% of the time was spent on meilisearch internals). IMHO this this very reasonable.
+
+**Note:** 80% might even be a too little, if I had to guess is something around 95-98%, but to be fair let's use a lower number.
 
 I used the latest version of Meilisearch available on nixpkgs (1.11.3) at the time of writing.
 
@@ -2808,90 +2810,94 @@ So how this is going to work: I have a list of 53 different queries with differe
 
 **Note:** Just as a disclaimer because this can be confusing. The normalization and tokenization of the text is done with the [unicode-segmentation crate](https://crates.io/crates/unicode-segmentation) and the way it deals with ponctuation is a bit weird. Tokenizing `"google.com"` will result in `["google.com"]`, which is the inverse of what you would expect which is `["google", ".", "com"]`, but tokenizing `"google. com"` will result in `["google", ".", "com"]`. So the case where `https://google` found 0 results and `https://google.com` found in 14 is right.
 
+**Note:** You might notice that Meilisearch returns more results and there is a few reason for it.
+* The way it deals with ponctuation is different. On my version a ponctuation is like any other token, but for meilisearch it become a space.
+* It also returns documents with subqueries of the searched query, for example the query `may have significant health effects`, returns 3 documents containing this sequence (just like mine), but also returns one aditional document containing `may have significant immunomodulatory effects`.
+
 ## Intersection
 
 {% highlight_lowest_value_in_row %}
-Query             | Simd    | Naive  | Results
-------------------| --------| -------| -------
-programming languages | 0.1496 | 0.7454 | 3284
-you need to be | 1.7760 | 9.3750 | 16144
-chemistry lessons | 0.1017 | 0.5944 | 38
-how to file taxes | 0.4956 | 2.1627 | 32
-how to make money | 2.0469 | 10.2508 | 779
-and you are in the most | 0.0266 | 0.1630 | 0
-as well as our | 0.3715 | 1.1343 | 2031
-you should go to the | 0.2172 | 1.3700 | 564
-do you know ? | 0.1869 | 0.8600 | 1054
-http:// | 2.1016 | 5.7091 | 280110
-if i was to give you | 0.1602 | 1.2111 | 3
-may have significant health effects | 0.4302 | 3.2684 | 3
-where are you going | 0.0168 | 0.0295 | 602
-but refused to join in | 0.0358 | 0.1139 | 2
-it may be useful to | 5.9048 | 13.7519 | 961
-A logical step before choosing the metrics and activities | 0.0228 | 0.0806 | 1
-of American Universities | 0.0854 | 0.6251 | 244
-beta-plus decay, it changes | 0.0107 | 0.0176 | 1
-https://google | 0.0932 | 0.2599 | 0
-However, some argue that it has less taste | 0.0483 | 0.2504 | 1
-It is important not to | 0.2090 | 1.4102 | 1564
-Windows 10 | 1.6637 | 7.5760 | 11264
-knowledge base article | 0.6087 | 3.3039 | 440
-is common in | 14.0448 | 32.1616 | 10134
-this is common in | 0.5524 | 2.3168 | 522
-this is common in the | 0.5166 | 1.3803 | 57
-and is thought to be | 0.2677 | 1.1394 | 673
-, you need to make sure that you have | 0.7306 | 2.6941 | 29
-we hope you had a great time | 0.1882 | 0.8915 | 4
-phrase search | 0.2445 | 1.3501 | 9
+Query | Simd | Naive | Meilisearch | Meilisearch (Original) | Results | Results (Meilisearch)
+----- | ---- | ----- | ----------- | ---------------------- | ------- | ---------------------
+programming languages | 0.1496 | 0.7454 | 3.3945 | 4.2432 | 3284 | 3489
+you need to be | 1.7760 | 9.3750 | 2.7952 | 3.4939 | 16144 | 49635
+chemistry lessons | 0.1017 | 0.5944 | 1.8531 | 2.3164 | 38 | 42
+how to file taxes | 0.4956 | 2.1627 | 1.2569 | 1.5712 | 32 | 69
+how to make money | 2.0469 | 10.2508 | 2.3632 | 2.9540 | 779 | 1250
+and you are in the most | 0.0266 | 0.1630 | 11.8306 | 14.7882 | 0 | 3318
+as well as our | 0.3715 | 1.1343 | 6.2618 | 7.8273 | 2031 | 2151
+you should go to the | 0.2172 | 1.3700 | 11.7778 | 14.7223 | 564 | 1236
+do you know ? | 0.1869 | 0.8600 | 1.4690 | 1.8362 | 1054 | 33626
+http:// | 2.1016 | 5.7091 | 1.3640 | 1.7050 | 280110 | 292613
+if i was to give you | 0.1602 | 1.2111 | 30.1017 | 37.6271 | 3 | 61
+may have significant health effects | 0.4302 | 3.2684 | 2.0546 | 2.5682 | 3 | 4
+where are you going | 0.0168 | 0.0295 | 1.5833 | 1.9792 | 602 | 842
+but refused to join in | 0.0358 | 0.1139 | 2.7975 | 3.4969 | 2 | 2
+it may be useful to | 5.9048 | 13.7519 | 3.8842 | 4.8553 | 961 | 1487
+A logical step before choosing the metrics and activities | 0.0228 | 0.0806 | 0.7340 | 0.9175 | 1 | 1
+of American Universities | 0.0854 | 0.6251 | 3.0246 | 3.7807 | 244 | 299
+beta-plus decay, it changes | 0.0107 | 0.0176 | 2.4970 | 3.1212 | 1 | 5
+https://google | 0.0932 | 0.2599 | 2.5573 | 3.1966 | 0 | 20
+However, some argue that it has less taste | 0.0483 | 0.2504 | 0.8314 | 1.0393 | 1 | 1
+It is important not to | 0.2090 | 1.4102 | 3.5816 | 4.4769 | 1564 | 2102
+Windows 10 | 1.6637 | 7.5760 | 1.5102 | 1.8877 | 11264 | 11479
+knowledge base article | 0.6087 | 3.3039 | 1.2739 | 1.5924 | 440 | 470
+is common in | 14.0448 | 32.1616 | 3.6056 | 4.5070 | 10134 | 13558
+this is common in | 0.5524 | 2.3168 | 7.3389 | 9.1737 | 522 | 796
+this is common in the | 0.5166 | 1.3803 | 9.9872 | 12.4840 | 57 | 216
+and is thought to be | 0.2677 | 1.1394 | 8.6885 | 10.8606 | 673 | 1364
+, you need to make sure that you have | 0.7306 | 2.6941 | 8.1053 | 10.1316 | 29 | 1050
+we hope you had a great time | 0.1882 | 0.8915 | 4.4113 | 5.5141 | 4 | 9
+phrase search | 0.2445 | 1.3501 | 1.6172 | 2.0215 | 9 | 19
 {% endhighlight_lowest_value_in_row %}
 
 ## Hybrid
 
 {% highlight_lowest_value_in_row %}
-Query             | Simd    | Naive  | Results
-------------------| --------| -------| -------
-1 2 3 | 1.6561 | 4.4241 | 42095
-1 2 3 4 5 6 7 | 4.9899 | 14.1061 | 9630
-when did this happen | 0.1744 | 0.5298 | 49
-World War II was fought | 0.0213 | 0.0721 | 18
-is common in the | 2.5428 | 9.2461 | 1549
+Query | Simd | Naive | Meilisearch | Meilisearch (Original) | Results | Results (Meilisearch)
+----- | ---- | ----- | ----------- | ---------------------- | ------- | ---------------------
+1 2 3 | 1.6561 | 4.4241 | 2.3420 | 2.9275 | 42095 | 80286
+1 2 3 4 5 6 7 | 4.9899 | 14.1061 | 6.8714 | 8.5893 | 9630 | 13114
+when did this happen | 0.1744 | 0.5298 | 7.4109 | 9.2637 | 49 | 52
+World War II was fought | 0.0213 | 0.0721 | 3.4111 | 4.2638 | 18 | 23
+is common in the | 2.5428 | 9.2461 | 6.5425 | 8.1781 | 1549 | 3876
 {% endhighlight_lowest_value_in_row %}
 
 ## Gallop
 
 {% highlight_lowest_value_in_row %}
-Query             | Simd    | Naive  | Results
-------------------| --------| -------| -------
-""help"" | 0.5473 | 0.5428 | 913
-""help" | 0.6309 | 0.6298 | 913
-"help"" | 0.6097 | 0.6050 | 913
-"help" | 0.6196 | 0.6180 | 913
-Office 212 Washington StreetSt | 0.0141 | 0.0141 | 1
-https://google.com | 0.0086 | 0.0086 | 14
+Query | Simd | Naive | Meilisearch | Meilisearch (Original) | Results | Results (Meilisearch)
+----- | ---- | ----- | ----------- | ---------------------- | ------- | ---------------------
+""help"" | 0.5473 | 0.5428 | 1.1099 | 1.3874 | 913 | 972623
+""help" | 0.6309 | 0.6298 | 1.1167 | 1.3959 | 913 | 972623
+"help"" | 0.6097 | 0.6050 | 1.1796 | 1.4745 | 913 | 972634
+"help" | 0.6196 | 0.6180 | 1.1997 | 1.4996 | 913 | 972634
+Office 212 Washington StreetSt | 0.0141 | 0.0141 | 0.3149 | 0.3936 | 1 | 1
+https://google.com | 0.0086 | 0.0086 | 2.7748 | 3.4684 | 14 | 18
 {% endhighlight_lowest_value_in_row %}
 
 ## Merge
 
 {% highlight_lowest_value_in_row %}
-Query             | Simd    | Naive  | Results
-------------------| --------| -------| -------
-Science & Mathematics PhysicsThe hot glowing surfaces of stars emit energy in the form of electromagnetic radiation.?It is a good approximation to assume that the emissivity e is equal to 1 for these surfaces.  Find the radius of the star Rigel, the bright blue star in the constellation Orion that radiates energy at a rate of 2.7 x 10^32 W and has a surface temperature of 11,000 K. Assume that the star is spherical. Use σ =... show moreFollow 3 answersAnswersRelevanceRatingNewestOldestBest Answer: Stefan-Boltzmann law states that the energy flux by radiation is proportional to the forth power of the temperature: q = ε · σ · T^4 The total energy flux at a spherical surface of Radius R is Q = q·π·R² = ε·σ·T^4·π·R² Hence the radius is R = √ ( Q / (ε·σ·T^4·π) ) = √ ( 2.7x10+32 W / (1 · 5.67x10-8W/m²K^4 · (1100K)^4 · π) ) = 3.22x10+13 mSource (s):http://en.wikipedia.org/wiki/Stefan_bolt...schmiso · 1 decade ago0 18 CommentSchmiso, you forgot a 4 in your answer. Your link even says it: L = 4pi (R^2)sigma (T^4). Using L, luminosity, as the energy in this problem, you can find the radius R by doing sqrt (L/ (4pisigma (T^4)). Hope this helps everyone.Caroline · 4 years ago4 1 Comment (Stefan-Boltzmann law) L = 4pi*R^2*sigma*T^4 Solving for R we get: => R = (1/ (2T^2)) * sqrt (L/ (pi*sigma)) Plugging in your values you should get: => R = (1/ (2 (11,000K)^2)) *sqrt ( (2.7*10^32W)/ (pi * (5.67*10^-8 W/m^2K^4))) R = 1.609 * 10^11 m? · 3 years ago0 1 CommentMaybe you would like to learn more about one of these?Want to build a free website? Interested in dating sites?Need a Home Security Safe? How to order contacts online? | 0.3440 | 0.3370 | 1
-"Science News from research organizationsCancer Statistics 2014: Death rates continue to dropDate: January 7, 2014Source: American Cancer SocietySummary: An American Cancer Society report finds steady declines in cancer death rates for the past two decades add up to a 20 percent drop in the overall risk of dying from cancer over that time period. Progress has been most rapid for middle-aged black men. Nevertheless, black men still have the highest cancer incidence and death rates among all ethnicities in the US.Share:FULL STORYThe American Cancer Society finds steady declines in cancer death rates for the past two decades add up to a 20 percent drop in the overall risk of dying from cancer over that time period. Progress has been most rapid for middle-aged black men, among whom death rates have declined by approximately 50 percent.Credit: © mybaitshop / FotoliaThe annual cancer statistics report from the American Cancer Society finds steady declines in cancer death rates for the past two decades add up to a 20 percent drop in the overall risk of dying from cancer over that time period. The report, Cancer Statistics 2014, finds progress has been most rapid for middle-aged black men, among whom death rates have declined by approximately 50 percent. Despite this substantial progress, black men continue to have the highest cancer incidence and death rates among all ethnicities in the U.S.-about double those of Asian Americans, who have the lowest rates.Each year, the American Cancer Society estimates the numbers of new cancer cases and deaths expected in the United States in the current year and compiles the most recent data on cancer incidence, mortality, and survival based on incidence data from the National Cancer Institute and the Centers for Disease Control and Prevention, and mortality data from the National Center for Health Statistics. The data are disseminated in two reports, Cancer Statistics, published in CA: A Cancer Journal for Clinicians, and its companion article, Cancer Facts & Figures.This year's report estimates there will be 1,665,540 new cancer cases and 585,720 cancer deaths in the United States in 2014. Among men, prostate, lung, and colon cancer will account for about half of all newly diagnosed cancers, with prostate cancer alone accounting for about one in four cases. Among women, the three most common cancers in 2014 will be breast, lung, and colon, which together will account for half of all cases. Breast cancer alone is expected to account for 29% of all new cancers among women.The estimated 585,720 deaths from cancer in 2014 correspond to about 1,600 deaths per day. Lung, colon, prostate, and breast cancers continue to be the most common causes of cancer death, accounting for almost half of the total cancer deaths among men and women. Just over one in four cancer deaths is due to lung cancer.During the most recent five years for which there are data (2006-2010), cancer incidence rates declined slightly in men (by 0.6% per year) and were stable in women, while cancer death rates decreased by 1.8% per year in men and by 1.4% per year in women. The combined cancer death rate has been continuously declining for two decades, from a peak of 215.1 per 100,000 in 1991 to 171.8 per 100,000 in 2010. This 20 percent decline translates to the avoidance of approximately 1,340,400 cancer deaths (952,700 among men and 387,700 among women) during this time period.The magnitude of the decline in cancer death rates from 1991 to 2010 varies substantially by age, race, and sex, ranging from no decline among white women aged 80 years and older to a 55% decline among black men aged 40 years to 49 years. Notably, black men experienced the largest drop within every 10-year age group.""The progress we are seeing is good, even remarkable, but we can and must do even better,"" said John R. Seffrin, PhD, chief executive officer of the American Cancer Society. ""The halving of the risk of cancer death among middle aged black men in just two decades is extraordinary, but it is immediately tempered by the knowledge that death rates are still higher among black men than white men for nearly every major cancer and for all cancers combined.""Story Source:Materials provided by American Cancer Society. Original written by Stacy Simon. Note: Content may be edited for style and length.Journal Reference:Rebecca Siegel, Jiemin Ma, Zhaohui Zou, Ahmedin Jemal. Cancer Statistics, 2014. CA: A Cancer Journal for Clinicians, 2014; DOI: 10.3322/caac.21208Cite This Page:MLA APA ChicagoAmerican Cancer Society. ""Cancer Statistics 2014: Death rates continue to drop."" ScienceDaily. ScienceDaily, 7 January 2014. <www.sciencedaily.com/releases/2014/01/140107102634.htm>.RELATED TOPICSHealth & MedicineBreast CancerColon CancerMen's HealthLung CancerProstate CancerCancerPancreatic CancerBrain TumoradvertisementRELATED TERMSColorectal cancerOvarian cancerCervical cancerStomach cancerBreast cancerProstate cancerCancerHepatocellular carcinomaRELATED STORIESBreast Cancer Incidence, Death Rates Rising in Some Economically Transitioning CountriesSep. 10, 2015 — A new study finds breast cancer incidence and death rates are increasing in several low and middle income countries, even as death rates have declined in most high income countries, despite ... read moreRacial Differences in Male Breast Cancer OutcomesMay 4, 2015 — While black and white men under age 65 diagnosed with early-stage breast cancer received similar treatment, blacks had a 76 percent higher risk of death than whites, research shows. Male breast ... read moreMore Than 1.5 Million Cancer Deaths Averted During 2 Decades of Dropping MortalityDec. 31, 2014 — The American Cancer Society's annual cancer statistics report finds that a 22 percent drop in cancer mortality over two decades led to the avoidance of more than 1.5 million cancer deaths that ... read moreColon Cancer Incidence Rates Decreasing Steeply in Older Americans, Study ShowsMar. 17, 2014 — Colon cancer incidence rates have dropped 30 percent in the US in the last 10 years among adults 50 and older due to the widespread uptake of colonoscopy, with the largest decrease in people over age ... read moreFROM AROUND THE WEBBelow are relevant articles that may interest you. ScienceDaily shares links and proceeds with scholarly publications in the TrendMD network." | 1.2170 | 1.1574 | 1
-(Image credit: Emma Christensen)Open SlideshowThe perfect baked potato is crispy on the outside and pillowy in the middle. Cracked open and still steaming, it's ready to receive anything from a sprinkle of cheese to last night's stew. Here's how to make one.Baking a potato in the oven does require a little more time than zapping it in the microwave, but it's mostly hands-off time. You can walk in the door, throw a few potatoes in oven while it's still warming up, and carry on with your after-work routine until they're ready to eat. Just don't forget to set a timer! (Image credit: Kitchn)Russets are the best for baking like this. The skins are thicker and the starchy interior has a sweet flavor and fluffy texture when baked. Russets are also typically fairly large. One of them per person makes a good side dish or meal on its own.Russets are the best for baking like this. The skins are thicker and the starchy interior has a sweet flavor and fluffy texture when baked.How To Bake a PotatoWhat You NeedIngredients1russet potato per personOlive oilSaltPepperEquipmentA forkA baking sheet covered in foilInstructionsHeat the oven to 425°F: Turn on the oven while you're preparing the potatoes.Scrub the potatoes clean: Scrub the potatoes thoroughly under running water and pat them dry. You don't have to remove the eyes, but trim away any blemishes with a paring knife.Rub the potatoes with olive oil: Rub the potatoes all over with a little olive oil. It's easiest to use your hands, but a pastry brush also works fine.Sprinkle the potatoes with salt and pepper: Generously sprinkle the potatoes on all sides with salt and pepper.Prick all over with a fork: Prick the potatoes in a few places with the tines of a fork. This allows steam to escape from the baking potato.Bake the potatoes: You can bake the potatoes directly on the oven rack, or you can place them a few inches apart on a foil-lined baking sheet. Bake the potatoes for 50 to 60 minutes. Flip them over every 20 minutes or so and check them for doneness by piercing them with a fork. Potatoes are done when the skins are dry and the insides feel completely soft when pierced.Recipe NotesTo cut down the baking time, microwave the potatoes for 3 to 4 minutes in the microwave before baking.For softer skins, wrap the potatoes in foil before baking.Print RecipeShow Nutrition | 0.4801 | 0.4709 | 2
+Query | Simd | Naive | Meilisearch | Meilisearch (Original) | Results | Results (Meilisearch)
+----- | ---- | ----- | ----------- | ---------------------- | ------- | ---------------------
+Science & Mathematics PhysicsThe hot glowing surfaces of stars emit energy in the form of electromagnetic radiation.?It is a good approximation to assume that the emissivity e is equal to 1 for these surfaces.  Find the radius of the star Rigel, the bright blue star in the constellation Orion that radiates energy at a rate of 2.7 x 10^32 W and has a surface temperature of 11,000 K. Assume that the star is spherical. Use σ =... show moreFollow 3 answersAnswersRelevanceRatingNewestOldestBest Answer: Stefan-Boltzmann law states that the energy flux by radiation is proportional to the forth power of the temperature: q = ε · σ · T^4 The total energy flux at a spherical surface of Radius R is Q = q·π·R² = ε·σ·T^4·π·R² Hence the radius is R = √ ( Q / (ε·σ·T^4·π) ) = √ ( 2.7x10+32 W / (1 · 5.67x10-8W/m²K^4 · (1100K)^4 · π) ) = 3.22x10+13 mSource (s):http://en.wikipedia.org/wiki/Stefan_bolt...schmiso · 1 decade ago0 18 CommentSchmiso, you forgot a 4 in your answer. Your link even says it: L = 4pi (R^2)sigma (T^4). Using L, luminosity, as the energy in this problem, you can find the radius R by doing sqrt (L/ (4pisigma (T^4)). Hope this helps everyone.Caroline · 4 years ago4 1 Comment (Stefan-Boltzmann law) L = 4pi*R^2*sigma*T^4 Solving for R we get: => R = (1/ (2T^2)) * sqrt (L/ (pi*sigma)) Plugging in your values you should get: => R = (1/ (2 (11,000K)^2)) *sqrt ( (2.7*10^32W)/ (pi * (5.67*10^-8 W/m^2K^4))) R = 1.609 * 10^11 m? · 3 years ago0 1 CommentMaybe you would like to learn more about one of these?Want to build a free website? Interested in dating sites?Need a Home Security Safe? How to order contacts online? | 0.3440 | 0.3370 | 11.9476 | 14.9344 | 1 | 1
+"Science News from research organizationsCancer Statistics 2014: Death rates continue to dropDate: January 7, 2014Source: American Cancer SocietySummary: An American Cancer Society report finds steady declines in cancer death rates for the past two decades add up to a 20 percent drop in the overall risk of dying from cancer over that time period. Progress has been most rapid for middle-aged black men. Nevertheless, black men still have the highest cancer incidence and death rates among all ethnicities in the US.Share:FULL STORYThe American Cancer Society finds steady declines in cancer death rates for the past two decades add up to a 20 percent drop in the overall risk of dying from cancer over that time period. Progress has been most rapid for middle-aged black men, among whom death rates have declined by approximately 50 percent.Credit: © mybaitshop / FotoliaThe annual cancer statistics report from the American Cancer Society finds steady declines in cancer death rates for the past two decades add up to a 20 percent drop in the overall risk of dying from cancer over that time period. The report, Cancer Statistics 2014, finds progress has been most rapid for middle-aged black men, among whom death rates have declined by approximately 50 percent. Despite this substantial progress, black men continue to have the highest cancer incidence and death rates among all ethnicities in the U.S.-about double those of Asian Americans, who have the lowest rates.Each year, the American Cancer Society estimates the numbers of new cancer cases and deaths expected in the United States in the current year and compiles the most recent data on cancer incidence, mortality, and survival based on incidence data from the National Cancer Institute and the Centers for Disease Control and Prevention, and mortality data from the National Center for Health Statistics. The data are disseminated in two reports, Cancer Statistics, published in CA: A Cancer Journal for Clinicians, and its companion article, Cancer Facts & Figures.This year's report estimates there will be 1,665,540 new cancer cases and 585,720 cancer deaths in the United States in 2014. Among men, prostate, lung, and colon cancer will account for about half of all newly diagnosed cancers, with prostate cancer alone accounting for about one in four cases. Among women, the three most common cancers in 2014 will be breast, lung, and colon, which together will account for half of all cases. Breast cancer alone is expected to account for 29% of all new cancers among women.The estimated 585,720 deaths from cancer in 2014 correspond to about 1,600 deaths per day. Lung, colon, prostate, and breast cancers continue to be the most common causes of cancer death, accounting for almost half of the total cancer deaths among men and women. Just over one in four cancer deaths is due to lung cancer.During the most recent five years for which there are data (2006-2010), cancer incidence rates declined slightly in men (by 0.6% per year) and were stable in women, while cancer death rates decreased by 1.8% per year in men and by 1.4% per year in women. The combined cancer death rate has been continuously declining for two decades, from a peak of 215.1 per 100,000 in 1991 to 171.8 per 100,000 in 2010. This 20 percent decline translates to the avoidance of approximately 1,340,400 cancer deaths (952,700 among men and 387,700 among women) during this time period.The magnitude of the decline in cancer death rates from 1991 to 2010 varies substantially by age, race, and sex, ranging from no decline among white women aged 80 years and older to a 55% decline among black men aged 40 years to 49 years. Notably, black men experienced the largest drop within every 10-year age group.""The progress we are seeing is good, even remarkable, but we can and must do even better,"" said John R. Seffrin, PhD, chief executive officer of the American Cancer Society. ""The halving of the risk of cancer death among middle aged black men in just two decades is extraordinary, but it is immediately tempered by the knowledge that death rates are still higher among black men than white men for nearly every major cancer and for all cancers combined.""Story Source:Materials provided by American Cancer Society. Original written by Stacy Simon. Note: Content may be edited for style and length.Journal Reference:Rebecca Siegel, Jiemin Ma, Zhaohui Zou, Ahmedin Jemal. Cancer Statistics, 2014. CA: A Cancer Journal for Clinicians, 2014; DOI: 10.3322/caac.21208Cite This Page:MLA APA ChicagoAmerican Cancer Society. ""Cancer Statistics 2014: Death rates continue to drop."" ScienceDaily. ScienceDaily, 7 January 2014. <www.sciencedaily.com/releases/2014/01/140107102634.htm>.RELATED TOPICSHealth & MedicineBreast CancerColon CancerMen's HealthLung CancerProstate CancerCancerPancreatic CancerBrain TumoradvertisementRELATED TERMSColorectal cancerOvarian cancerCervical cancerStomach cancerBreast cancerProstate cancerCancerHepatocellular carcinomaRELATED STORIESBreast Cancer Incidence, Death Rates Rising in Some Economically Transitioning CountriesSep. 10, 2015 — A new study finds breast cancer incidence and death rates are increasing in several low and middle income countries, even as death rates have declined in most high income countries, despite ... read moreRacial Differences in Male Breast Cancer OutcomesMay 4, 2015 — While black and white men under age 65 diagnosed with early-stage breast cancer received similar treatment, blacks had a 76 percent higher risk of death than whites, research shows. Male breast ... read moreMore Than 1.5 Million Cancer Deaths Averted During 2 Decades of Dropping MortalityDec. 31, 2014 — The American Cancer Society's annual cancer statistics report finds that a 22 percent drop in cancer mortality over two decades led to the avoidance of more than 1.5 million cancer deaths that ... read moreColon Cancer Incidence Rates Decreasing Steeply in Older Americans, Study ShowsMar. 17, 2014 — Colon cancer incidence rates have dropped 30 percent in the US in the last 10 years among adults 50 and older due to the widespread uptake of colonoscopy, with the largest decrease in people over age ... read moreFROM AROUND THE WEBBelow are relevant articles that may interest you. ScienceDaily shares links and proceeds with scholarly publications in the TrendMD network." | 1.2170 | 1.1574 | 46.1473 | 57.6841 | 1 | 299990
+(Image credit: Emma Christensen)Open SlideshowThe perfect baked potato is crispy on the outside and pillowy in the middle. Cracked open and still steaming, it's ready to receive anything from a sprinkle of cheese to last night's stew. Here's how to make one.Baking a potato in the oven does require a little more time than zapping it in the microwave, but it's mostly hands-off time. You can walk in the door, throw a few potatoes in oven while it's still warming up, and carry on with your after-work routine until they're ready to eat. Just don't forget to set a timer! (Image credit: Kitchn)Russets are the best for baking like this. The skins are thicker and the starchy interior has a sweet flavor and fluffy texture when baked. Russets are also typically fairly large. One of them per person makes a good side dish or meal on its own.Russets are the best for baking like this. The skins are thicker and the starchy interior has a sweet flavor and fluffy texture when baked.How To Bake a PotatoWhat You NeedIngredients1russet potato per personOlive oilSaltPepperEquipmentA forkA baking sheet covered in foilInstructionsHeat the oven to 425°F: Turn on the oven while you're preparing the potatoes.Scrub the potatoes clean: Scrub the potatoes thoroughly under running water and pat them dry. You don't have to remove the eyes, but trim away any blemishes with a paring knife.Rub the potatoes with olive oil: Rub the potatoes all over with a little olive oil. It's easiest to use your hands, but a pastry brush also works fine.Sprinkle the potatoes with salt and pepper: Generously sprinkle the potatoes on all sides with salt and pepper.Prick all over with a fork: Prick the potatoes in a few places with the tines of a fork. This allows steam to escape from the baking potato.Bake the potatoes: You can bake the potatoes directly on the oven rack, or you can place them a few inches apart on a foil-lined baking sheet. Bake the potatoes for 50 to 60 minutes. Flip them over every 20 minutes or so and check them for doneness by piercing them with a fork. Potatoes are done when the skins are dry and the insides feel completely soft when pierced.Recipe NotesTo cut down the baking time, microwave the potatoes for 3 to 4 minutes in the microwave before baking.For softer skins, wrap the potatoes in foil before baking.Print RecipeShow Nutrition | 0.4801 | 0.4709 | 13.6963 | 17.1204 | 2 | 2
 {% endhighlight_lowest_value_in_row %}
 
 ## Single Token
 
 {% highlight_lowest_value_in_row %}
-Query             | Simd    | Naive  | Results
-------------------| --------| -------| -------
-what is | 0.1388 | 0.1406 | 425323
-what is the | 0.0411 | 0.0508 | 150270
-the name | 0.0789 | 0.0790 | 208130
-name the | 0.0030 | 0.0031 | 10506
-your house | 0.0056 | 0.0063 | 22953
-and the | 0.9163 | 0.9169 | 1415088
-you can go | 0.0041 | 0.0045 | 16947
-do not | 0.1826 | 0.1826 | 534453
-$3,000 | 0.0037 | 0.0039 | 12494
+Query | Simd | Naive | Meilisearch | Meilisearch (Original) | Results | Results (Meilisearch)
+----- | ---- | ----- | ----------- | ---------------------- | ------- | ---------------------
+what is | 0.1388 | 0.1406 | 2.0680 | 2.5850 | 425323 | 496590
+what is the | 0.0411 | 0.0508 | 2.1396 | 2.6745 | 150270 | 245645
+the name | 0.0789 | 0.0790 | 3.0809 | 3.8511 | 208130 | 212102
+name the | 0.0030 | 0.0031 | 1.2899 | 1.6124 | 10506 | 17944
+your house | 0.0056 | 0.0063 | 3.5441 | 4.4301 | 22953 | 23907
+and the | 0.9163 | 0.9169 | 1.6157 | 2.0196 | 1415088 | 1419321
+you can go | 0.0041 | 0.0045 | 6.6274 | 8.2843 | 16947 | 20754
+do not | 0.1826 | 0.1826 | 1.4025 | 1.7531 | 534453 | 541560
+$3,000 | 0.0037 | 0.0039 | 1.6308 | 2.0385 | 12494 | 13006
 {% endhighlight_lowest_value_in_row %}

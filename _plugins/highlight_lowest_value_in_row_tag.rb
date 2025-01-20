@@ -14,14 +14,14 @@ module Jekyll
                 row_cells = row.scan(/<td.*?>(.*?)<\/td>/).flatten
 
                 row_values = row_cells.each_with_index
-                    .select { |v, idx| idx != row_cells.length - 1 }
+                    .select { |v, idx| idx < row_cells.length - 2 }
                     .map { |v, idx| Float(v) rescue Float::MAX }
                     .compact
                 min_value = row_values.min
 
                 # Process the row
                 row.gsub(/<td.*?>(.*?)<\/td>/m).with_index do |cell, idx|
-                    next cell if idx == row_cells.length - 1
+                    next cell if idx >= row_cells.length - 2
                     # Find the value inside the cell
                     value = Float(cell.match(/<td.*?>(.*?)<\/td>/)[1]) rescue Float::MAX
 
