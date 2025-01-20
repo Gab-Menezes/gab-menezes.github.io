@@ -46,7 +46,7 @@ So this makes phrase search way more computationally expensive. The conventional
 ## How the conventional algorithm works
 ![](/assets/2025-01-13-using-the-most-unhinged-avx-512-instruction-to-make-the-fastest-phrase-search-algo/conventional-phrase-search-algo.png)
 
-This algorithm (taken from Information Retrieval: Implementing and Evaluating Search Engines) analyzes one document at a time, so the `nextPhrase` function needs to be called for each document in the intersection of document ids in the index.
+This algorithm (taken from Information Retrieval: Implementing and Evaluating Search Engines) analyzes one document at a time, so the `nextPhrase` function needs to be called for each document in the intersection of document IDs in the index.
 
 Description (also taken from the book): Locates the first occurrence of a phrase after a given position. The function calls the `next(t, i)` method which returns the next position `t` after the position `i`. Similar to `prev(t, i)`.
 
@@ -156,9 +156,9 @@ The group 21 is in the intersection, so:
 
 With this "little lamb" is found in group 21 value 3, i.e `21*16+3 = 339`.
 
-And the magical part is: To avoid having to analyze one document at a time, we can pack the document id (assuming a 32-bit document id) into the 32 MSB of a 64-bit number, while the LSB are the group and value. `packed = (doc_id << 32) | group_value`.
+And the magical part is: To avoid having to analyze one document at a time, we can pack the document ID (assuming a 32-bit document ID) into the 32 MSB of a 64-bit number, while the LSB are the group and value. `packed = (doc_id << 32) | group_value`.
 
-When calculating the intersection, we take the document id and group (48 MSBs). With this, we can search the whole index in a single shot. So in the end, we have a single continuous array of data, with all document ids and positions that contain that token.
+When calculating the intersection, we take the document ID and group (48 MSBs). With this, we can search the whole index in a single shot. So in the end, we have a single continuous array of data, with all document IDs and positions that contain that token.
 
 Pretty cool.
 
@@ -736,7 +736,7 @@ No optimization will save you from having a poor reverse index implementation, s
 
 My reverse index, like any other part, has gone through drastic changes during development (that's why having a low index time is good). But there are two pieces of technology that were the heart and soul in every version: [heed](https://github.com/meilisearch/heed) ([LMDB](http://www.lmdb.tech/doc/)) and [rkyv](https://github.com/rkyv/rkyv). A special shoutout to the creator of rkyv ([David Koloski](https://github.com/djkoloski)), a super helpful person who released the 0.8.X version that allowed me to use the unaligned feature and is super active on their discord, helping people by answering questions and fixing bugs in minutes when they are reported.
 
-Now let's go through the structure of my reverse index. We have 3 databases, that's it. Simple and effective. The first database holds some metadata about the index, the second holds the internal document id to the document itself, and the third holds the token to the Roaringish Packed (continuous block of memory of `u64`s (`u32` for the doc id, `u16` for the index, and `u16` for the values as discussed above)).
+Now let's go through the structure of my reverse index. We have 3 databases, that's it. Simple and effective. The first database holds some metadata about the index, the second holds the internal document ID to the document itself, and the third holds the token to the Roaringish Packed (continuous block of memory of `u64`s (`u32` for the document ID, `u16` for the index, and `u16` for the values as discussed above)).
 
 Let's take a look at the signature of the `index` function:
 ```rust
@@ -948,7 +948,7 @@ Now that the boring stuff is behind us, let's start the fun part. Again, just as
 
 In this section, we will take a look at assembly, some cool tools to analyze this assembly, AVX-512, differences in the microarchitecture of AMD and Intel chips, emulation of instructions, and a lot more. So again, sorry to bother you with all of the previous stuff, but it was important.
 
-For your better understanding of how the two intersection phases work, let's start with the naive version and build our way to the simd one.
+For your better understanding of how the two intersection phases work, let's start with the naive version and build our way to the SIMD one.
 
 The intersection used by the search function is a generic, and the type needs to implement the `Intersect` trait.
 
@@ -1102,7 +1102,7 @@ len:    50         10         5      40
     * This is correct because the position of `t_0 t_1` is the same as `t_0` and `t_2 t_3 t_4 t_5 t_6 t_7` has the same position as `t_6` (not `t_7`) (the position after intersecting with a token to the right is the position of the first token of the rhs sequence)
 4. Repeat this for the rest of the lhs and rhs tokens.
 
-With this, I hope the `lhs_len` parameter makes sense. **So why do we need it?** We can just divide this value by 16 (remembering that each group holds 16 values) to find how much we need to add to the group of lhs to match rhs (remembering that the intersection is done in the 48 MSBs, document id and group, so they need to be equal).
+With this, I hope the `lhs_len` parameter makes sense. **So why do we need it?** We can just divide this value by 16 (remembering that each group holds 16 values) to find how much we need to add to the group of lhs to match rhs (remembering that the intersection is done in the 48 MSBs, document ID and group, so they need to be equal).
 
 And the remainder of this division tells us how much we need to shift the lhs values (16 LSBs) to intersect with the rhs ones. We also use this remainder to calculate two bit masks `msb_mask` and `lsb_mask` (we will talk about them later). For example, if the remainder is 3, these masks will assume the following values (just keep them in mind): 
 
@@ -1210,7 +1210,7 @@ And to finish, let's analyze what we write into the output buffers (`packed_resu
 
 If `lhs_doc_id_group == rhs_doc_id_group`:
 * We compute the intersection of the values (similar to how the original implementation of Doug does, but here we shift left by the remainder of the division).
-* This intersection can be 0. We could check with an if statement or do it branchless, but we can also check this during the merge phase, and that's what I decided to do (this makes our lives in the simd version easier).
+* This intersection can be 0. We could check with an if statement or do it branchless, but we can also check this during the merge phase, and that's what I decided to do (this makes our lives in the SIMD version easier).
     * We could do two checks, one here and one in the merge, but there is no need/meaningful speed difference, so it's fine.
 * Write the OR between `lhs_doc_id_group` and the `intersection` to `packed_result`.
 * We also do a branchless write only if the bits of lhs value would cross the group boundary when shifting (that's why we have the `msb_mask`). To save the work in the second phase, we already add one to the group (the `msb_packed_result` is used in the second intersection phase as the lhs one).
@@ -1700,7 +1700,7 @@ Before the main loop begins, we initialize the SIMD version of the needed variab
 
 Loop over this capped slice, so instead of incrementing by 1 the lhs or rhs index, we increment by `N` (similar to the naive version).
 
-* Get the last lhs and rhs document id and group of the current SIMD vector. This is used at the end of the loop to check which index we need to increment by `N` (similar to the naive version).
+* Get the last lhs and rhs document ID and group of the current SIMD vector. This is used at the end of the loop to check which index we need to increment by `N` (similar to the naive version).
 
 **Note:** There is a very specific reason for this to be at the beginning of the loop and not at the end where they are used. We will get there, just wait.
 
@@ -1708,9 +1708,9 @@ Loop over this capped slice, so instead of incrementing by 1 the lhs or rhs inde
 
 **Note:** If you know your SIMD intrinsics, you will notice that this is an aligned load. Doing aligned loads is considerably faster, that's why we want things to be 64-byte aligned, to get a speedup here. I know that using the unaligned version will lead to the same performance if the address happens to be aligned, but I want to be 100% sure that we are doing aligned loads because if not, something went wrong, and I prefer to crash the program if this happens.
 
-* Add to the group of the lhs vector and get the document id and group from lhs and rhs. We also get the values from rhs (similar to the naive version).
+* Add to the group of the lhs vector and get the document ID and group from lhs and rhs. We also get the values from rhs (similar to the naive version).
 
-* Intersect the lhs and rhs document id and group (similar to the naive version) using the beautiful vp2intersect and get their respective masks back.
+* Intersect the lhs and rhs document ID and group (similar to the naive version) using the beautiful vp2intersect and get their respective masks back.
 
 **Note:** Since all document IDs and groups in lhs/rhs are different (in increasing order), we know that the number of bits set in each mask is the same.
 
@@ -1730,7 +1730,7 @@ Loop over this capped slice, so instead of incrementing by 1 the lhs or rhs inde
 
 **Note:** I couldn't find a way to eliminate this unaligned store, unfortunately. From what I measured with perf, this is now one of the big bottlenecks of this loop.
 
-* Increment `i` (similar to the naive version) (length of `packed_result`) by the number of document ids and groups that were in the intersection and have their values intersection computed (this will generate a popcount).
+* Increment `i` (similar to the naive version) (length of `packed_result`) by the number of document IDs and groups that were in the intersection and have their values intersection computed (this will generate a popcount).
 
 **Note:** That's why I said that allowing the values intersection to be 0 makes our life easier. If not, we would need to check which values in the `intersection` vector are greater than 0 and do one more Compress operation, not good... Checking this during the merge phase is faster and cleaner, in my opinion.
 
@@ -1798,7 +1798,7 @@ lhs_values_compress:   0,0,v_0 | 0,0,v_3 | 0,0,0   | 0,0,0   | 0,0,0   | 0,0,0  
 rhs_values_compress:   0,0,v_8 | 0,0,v_10| 0,0,0   | 0,0,0   | 0,0,0   | 0,0,0   | 0,0,0   | 0,0,0
 
 // Bitwise intersection between lhs_values_compress and rhs_values_compress
-// (I'm going to ignore the document id an group, since they are 0 
+// (I'm going to ignore the document ID an group, since they are 0 
 // to make it fit on screen, but they are still there)
 intersection: (v_0 << 1)&v_8 | (v_3 << 1)&v_10 | (0 << 1)&0 | (0 << 1)&0 | (0 << 1)&0 | (0 << 1)&0 | (0 << 1)&0 | (0 << 1)&0
 // Simplifying
@@ -1815,10 +1815,10 @@ packed_result: ... | 1,1,(v_0 << 1)&v_8 | 5,3,(v_3 << 1)&v_10 | 0,0,0 | 0,0,0 | 
                                                               ^
                                                               i
 
-// Since lhs_last <= rhs_last we need to analyze the MSB's
+// Since lhs_last <= rhs_last we need to analyze the MSBs
 // msb_mask is 64bit x 8 lanes, but the 16LSB's is where this value can 
 // change (because this is where the values are poisitioned), so the
-// 48 MSB's are zeroed out.
+// 48 MSBs are zeroed out.
 
 // (lhs_pack & msb_mask) > 0
 // I'm going to randomly generete some bits for the mask for the sake
@@ -1862,7 +1862,7 @@ fn rotl_u16(a: Simd<u64, N>, i: u64) -> Simd<u64, N> {
 
     // we don't need to unpack the values, since
     // in the next step we already `and` with
-    // with mask where the doc id and group are
+    // with mask where the doc ID and group are
     // zeroed
     p0 | p1
 }
@@ -1975,7 +1975,7 @@ There are a few noticeable differences:
 
 And that's it, that's how you implement an intersection using AVX-512.
 
-{% details **Code** for the simd intersection merged into a single function **(you can ignore if you want)** %}
+{% details **Code** for the SIMD intersection merged into a single function **(you can ignore if you want)** %}
 ```rust
 #[inline(always)]
 fn inner_intersect<const FIRST: bool>(
@@ -2328,7 +2328,7 @@ We are going to search by 1000000,0,0
 
 Skipping all of the beginning section of rhs avoids having to compute the intersection of elements that can't be in the final result.
 
-We have to be careful though, for this to work properly we need to search for only the document ID, the group, and values need to be 0, so we find the first occurrence of this document id, avoiding skipping elements where the value MSBs would cross the group boundary.
+We have to be careful though, for this to work properly we need to search for only the document ID, the group, and values need to be 0, so we find the first occurrence of this document ID, avoiding skipping elements where the value MSBs would cross the group boundary.
 
 Also, take care to align the beginning of the Roaringish Packed to 64 bytes.
 
@@ -2669,7 +2669,7 @@ fn merge_results(
 {% enddetails %}
 <br/>
 
-# Getting the document ids
+# Getting the document IDs
 There is something interesting here, but the article is long enough, so I will just drop the naive and SIMD versions. They are very simple to understand, so if you want...
 
 {% details **Code** for the naive version **(you can ignore if you want)** %}
@@ -2708,7 +2708,7 @@ fn get_doc_ids(&self,) -> Vec<u32> {
 {% enddetails %}
 <br/>
 
-{% details **Code** for the simd version **(you can ignore if you want)** %}
+{% details **Code** for the SIMD version **(you can ignore if you want)** %}
 ```rust
 fn get_doc_ids(&self) -> Vec<u32> {
     if self.0.is_empty() {
@@ -2865,7 +2865,7 @@ is common in the | 2.5428 | 9.2461 | 6.5425 | 8.1781 | 1549 | 3876 | 2.5730x
 {% endhighlight_lowest_value_in_row %}
 
 ## Gallop Intersection
-These are queries where gallop intersection dominates, so the difference between naive and simd is very close (most of the difference is due to noise).
+These are queries where gallop intersection dominates, so the difference between naive and SIMD is very close (most of the difference is due to noise).
 
 {% highlight_lowest_value_in_row %}
 Query | Simd | Naive | Meilisearch | Meilisearch (Original) | Results | Results (Meilisearch) | Performance gain
