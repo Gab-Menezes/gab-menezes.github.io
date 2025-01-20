@@ -2907,10 +2907,10 @@ $3,000 | 0.0037 | 0.0039 | 1.6308 | 2.0385 | 12494 | 13006 | 440.7568x
 {% endhighlight_lowest_value_in_row %}
 
 # Final thoughts
-We beated Meilisearch in 49/53 queries and we got from 1.5x up to 1600x performance increase, so if I had to say I'm more than happy with the final results.
+We beat Meilisearch in 49/53 queries, achieving performance increases ranging from 1.5x to 1600x. I'm more than happy with the final results.
 
-Probably with one of two new optimization ideas we could beat Meilisearch in 53/53, but at this point I'm kinda tired of the project/out of ideas.
+With one or two new optimization ideas, we could probably beat Meilisearch in all 53 queries, but at this point, I'm kind of tired of the project and out of ideas.
 
-Also I'm very happy with the performance of the simd algo when compared to the naive version.
+I'm also very happy with the performance of the SIMD algorithm compared to the naive version.
 
 I hope you enjoyed the ride. <3
