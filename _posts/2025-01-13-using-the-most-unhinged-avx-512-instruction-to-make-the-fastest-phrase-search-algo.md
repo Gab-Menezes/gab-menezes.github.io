@@ -4,65 +4,65 @@ title: "Using the most unhinged AVX-512 instruction to make the fastest phrase s
 ---
 
 # Disclaimers before we start
-* For those who don't wanna read/don't care that much here are the [results](#results), I hope after seeing them you are compelled to read. **TL;DR:** I wrote a super fast phrase search algo using AVX-512 and achived wins up to 1600x the performance of Meilisearch.
-* The contents of this blog post are inspired by the wonderful idea of [Doug Turbull](https://softwaredoug.com/) from the series of blog posts about [Roaringish](https://softwaredoug.com/blog/2024/01/21/search-array-phrase-algorithm). In here we will take this ideas to an extreme, from smart algos to raw performance optimization.
-* I highly recommend reading the [Roaringish](https://softwaredoug.com/blog/2024/01/21/search-array-phrase-algorithm) blog post, but if you don't want there will be a recap on how it works.
-* This project it's been almost 7 months in the making, thousands and thousands of line of code have been written an rewritten, so bear with me if I sound crazy. At the moment of writing there is almost 2.7k LOC, but I have commited around 17k LOC (let's take a few thousands because of `.lock` files) (probably at the time of publishing this number has increased), so the project has be rewritten almost 6 times.
+* For those who don't want to read/don't care that much, here are the [results](#results). I hope after seeing them you are compelled to read. **TL;DR:** I wrote a super fast phrase search algorithm using AVX-512 and achieved wins up to 1600x the performance of Meilisearch.
+* The contents of this blog post are inspired by the wonderful idea of [Doug Turnbull](https://softwaredoug.com/) from the series of blog posts about [Roaringish](https://softwaredoug.com/blog/2024/01/21/search-array-phrase-algorithm). Here we will take these ideas to an extreme, from smart algorithms to raw performance optimization.
+* I highly recommend reading the [Roaringish](https://softwaredoug.com/blog/2024/01/21/search-array-phrase-algorithm) blog post, but if you don't want to, there will be a recap on how it works.
+* This project has been almost 7 months in the making, with thousands and thousands of lines of code written and rewritten, so bear with me if I sound crazy. At the moment of writing, there are almost 2.7k LOC, but I have committed around 17k LOC (let's take a few thousand because of `.lock` files) (probably at the time of publishing this number has increased), so the project has been rewritten almost 6 times.
 
 ![](/assets/2025-01-13-using-the-most-unhinged-avx-512-instruction-to-make-the-fastest-phrase-search-algo/loc.png)
 
-* At the beginning I wasn't planning on writing a blog post about it, but I invested so much time and the end result is so cool that I think it's worth a blog post.
-* I started writing a first version but didn't like the direction it was going, so I decided to change it and here we are. So my plan is to show the current state of the project and try my best to remember and to explain why things are the way they are, a lot of benchmarking and fine tuning was done so it's almost impossible for me to remember everything. Maybe in some cases I will go back in time to explain the reason certain optimization was chosen and others I might just explain how it works. This post will probably be long, so grab some water/tea/coffee.
-* Again every piece of code that you will get to see has been rewritten a lot of times, I didn't magically arrive at the solution.
+* At the beginning, I wasn't planning on writing a blog post about it, but I invested so much time and the end result is so cool that I think it's worth a blog post.
+* I started writing a first version but didn't like the direction it was going, so I decided to change it and here we are. So my plan is to show the current state of the project and try my best to remember and explain why things are the way they are. A lot of benchmarking and fine-tuning was done, so it's almost impossible for me to remember everything. Maybe in some cases, I will go back in time to explain the reason certain optimizations were chosen and others I might just explain how they work. This post will probably be long, so grab some water/tea/coffee.
+* Again, every piece of code that you will get to see has been rewritten a lot of times, I didn't magically arrive at the solution.
 * There will be a lot of `unsafe` keywords, don't be afraid of it.
 * **We won't talk about**:
-  * Multi threading, since this workload is trivially parallelizable (by sharding) it's kinda a easy to do it, and it's scales pretty much linearly, so if you are curious on who this would perform on `N` threads, just get the numbers and devide by `N`.
-  * Things outside my code to make it faster, like enabling Huge Pages.
-  * The main focus will be in the search part, so there will be no focus in the indexing part, only when needed
+    * Multi-threading, since this workload is trivially parallelizable (by sharding) it's kinda easy to do it, and it scales pretty much linearly, so if you are curious about how this would perform on `N` threads, just get the numbers and divide by `N`.
+    * Things outside my code to make it faster, like enabling Huge Pages.
+    * The main focus will be on the search part, so there will be no focus on the indexing part, only when needed.
 * **Benchmarking methodology**:
-  * We are optimizing for raw latency, the lower the better.
-  * I have randomly select a bunch of queries (each with different bottleneck profile) and measured how each change impacted it's performance.
-  * I ran each query 20 times to warmup the CPU, after that I ran the same query another 1000 times and collected the time taken as a whole and in each crucial step, with this we have time/iter.
-  * For those who say that that's not a good benchmark and I should have used criterion with statistical analysis and blah blah blah... All I can say is both of my system (spoiler alert) are pretty reproducible, up to 10us per iter.
-  * The core that I run the code in on my `isolcpus` list (the physical and mt part) and I used `taskset` everytime... Nothing else was running on the system while collecting data.
-  * So after the CPU is warm the time in each iteration is pretty damn consistent, so that's why I consider this good enough.
-  * The dataset used is the same used by Doug, [MS MARCO](https://microsoft.github.io/msmarco/), containing 3.2M documents, around 22GB of data. It consists of a link, question and a long answer, in this case we only index the answer (so 20/22GB of data) (in the original article only 1M documents were used, but in here we ingest all of it). 
-  * Getting close to the end there will be some benchmarks and a comparisions against [Meilisearch](https://www.meilisearch.com/) (production ready Search Engine, who is known for it's good performance).
-  * Spec of both of my systems where I ran all of the benchmarks:
-    * Notebook (where most of developemnt took part): i5-1135G7 - 16GB
-    * Desktop (final results on this system): 9700x - 64GB (Spoiler)
-* There will be a lot of source code for those who are intrested, but the unecessary ones will be collapsed, if you are not that intrested you can just skip those.
-* Also a huge thanks to all of the people who helped me through this, specially the super kind people on the [Gamozo's discord](https://discord.gg/gwfvzzQC), who through the last year had to see me go crazy about intersection algos.
-* **Why am I doing this ?** Because I like it and wanted to nerd snipe some people.
+    * We are optimizing for raw latency, the lower the better.
+    * I have randomly selected a bunch of queries (each with a different bottleneck profile) and measured how each change impacted the performance.
+    * I ran each query 20 times to warm up the CPU, after that I ran the same query another 1000 times and collected the time taken as a whole and in each crucial step, with this we have time/iter.
+    * For those who say that that's not a good benchmark and I should have used criterion with statistical analysis and blah blah blah... All I can say is both of my systems (spoiler alert) are pretty reproducible, up to 10us per iter.
+    * The core that I run the code is on my `isolcpus` list (the physical and mt part) and I used `taskset` every time... Nothing else was running on the system while collecting data.
+    * So after the CPU is warm, the time in each iteration is pretty damn consistent, so that's why I consider this good enough.
+    * The dataset used is the same used by Doug, [MS MARCO](https://microsoft.github.io/msmarco/), containing 3.2M documents, around 22GB of data. It consists of a link, question, and a long answer, in this case, we only index the answer (so 20/22GB of data) (in the original article only 1M documents were used, but here we ingest all of it). 
+    * Getting close to the end, there will be some benchmarks and comparisons against [Meilisearch](https://www.meilisearch.com/) (a production-ready Search Engine, known for its good performance).
+    * Spec of both of my systems where I ran all of the benchmarks:
+        * Notebook (where most of the development took place): i5-1135G7 - 16GB
+        * Desktop (final results on this system): 9700x - 64GB (Spoiler)
+* There will be a lot of source code for those who are interested, but the unnecessary ones will be collapsed, if you are not that interested you can just skip those.
+* Also a huge thanks to all of the people who helped me through this, especially the super kind people on the [Gamozo's discord](https://discord.gg/gwfvzzQC), who through the last year had to see me go crazy about intersection algorithms.
+* **Why am I doing this?** Because I like it and wanted to nerd snipe some people.
 
 
-# What are we doing ? And why we care ?
-Do you know when you go to your favorite search engine and search for something using double quotes, like passage of a book/article or something very specific ? That's called phrase search (sometimes exact search), what we are telling the search engine is that we want this exact words in this exact order (this varies from search engine to search engine, but that's the main idea). In contrast when searching by keywords (not in double quotes) we don't care about the order or if it's the exact word, it may be a variation.
+# What are we doing? And why do we care?
+Do you know when you go to your favorite search engine and search for something using double quotes, like a passage of a book/article or something very specific? That's called phrase search (sometimes exact search). What we are telling the search engine is that we want these exact words in this exact order (this varies from search engine to search engine, but that's the main idea). In contrast, when searching by keywords (not in double quotes), we don't care about the order or if it's the exact word it may be a variation.
 
-There is one big difference between this two, searching by keywords is relative cheap when compared to doing a phrase search. In both cases we are calculating the intersection between the reserve indexes (in the keyword search we may take the union, but for the sake of simplicity let's assume the intersection), but in the phrase search we need to keep track where each token appeared to guarantee that we are looking for tokens close to each other.
+There is one big difference between these two: searching by keywords is relatively cheap when compared to doing a phrase search. In both cases, we are calculating the intersection between the reverse indexes (in the keyword search we may take the union, but for the sake of simplicity let's assume the intersection), but in the phrase search, we need to keep track of where each token appeared to guarantee that we are looking for tokens close to each other.
 
-So this makes phrase search way more computationally expensive, the convetional algo found in books is very slow, let's take a look at this first and compare with Doug's brilliant idea.
+So this makes phrase search way more computationally expensive. The conventional algorithm found in books is very slow, let's take a look at this first and compare it with Doug's brilliant idea.
 
-## How the conventional algo works
-![](/assets/2025-01-13-using-the-most-unhinged-avx-512-instruction-to-make-the-fastest-phrase-search-algo/convetional-phrase-search-algo.png)
+## How the conventional algorithm works
+![](/assets/2025-01-13-using-the-most-unhinged-avx-512-instruction-to-make-the-fastest-phrase-search-algo/conventional-phrase-search-algo.png)
 
-This algo (taken from Information Retrieval: Implementing and Evaluating Search Engines) analyzes one document at the time, so the `nextPhrase` function needs to called for each document in the intersection of document ids in the index.
+This algorithm (taken from Information Retrieval: Implementing and Evaluating Search Engines) analyzes one document at a time, so the `nextPhrase` function needs to be called for each document in the intersection of document ids in the index.
 
-Description (also taken from the book): Locates the first occurrence of a phrase after a given position. The function calls the `next(t, i)` method which returns next position `t` after the position i. Similar to `prev(t, i)`.
+Description (also taken from the book): Locates the first occurrence of a phrase after a given position. The function calls the `next(t, i)` method which returns the next position `t` after the position `i`. Similar to `prev(t, i)`.
 
-You don't need to understand this algo, just that is inefficient because of a lot of reasons:
-  * Intersection is expensive
-  * Analyzes one document and the time
-  * Not cache friendly we are jumping around with the `next` and `prev` functions
-  * Recursive
+You don't need to understand this algorithm, just that it is inefficient because of a lot of reasons:
+    * Intersection is expensive
+    * Analyzes one document at a time
+    * Not cache friendly, we are jumping around with the `next` and `prev` functions
+    * Recursive
 
-For a small collection of documents this works fine, but imagine for large collections 1M+ documents this will blow up quiclky (hundreds of milliseconds, maybe even seconds per query), which is unacceptable for a real time search engine, so not good at all.
+For a small collection of documents, this works fine, but imagine for large collections of 1M+ documents this will blow up quickly (hundreds of milliseconds, maybe even seconds per query), which is unacceptable for a real-time search engine, so not good at all.
 
 
 ## The genius idea
-How did Doug fixed this ? With a lot of clever bit hacking. The following example is taken from the blog post and summarized by me, also fixed some small mistakes in the examples (again highly recommend reading the [original blog post](https://softwaredoug.com/blog/2024/01/21/search-array-phrase-algorithm)).
+How did Doug fix this? With a lot of clever bit hacking. The following example is taken from the blog post and summarized by me, also fixing some small mistakes in the examples (again, I highly recommend reading the [original blog post](https://softwaredoug.com/blog/2024/01/21/search-array-phrase-algorithm)).
 
-Let's say we want to index the following documents to be able to phrase search them in the future
+Let's say we want to index the following documents to be able to phrase search them in the future:
 ```
 doc 0: "mary had a little lamb the lamb ate mary"
 doc 1: "uhoh little mary dont eat the lamb it will get revenge"
@@ -99,17 +99,17 @@ lamb:
 ...
 ```
 
-To do a phrase search we can connect two terms at the time, the left and right one. Searching by "mary had a little lamb", will result in searching by:
+To do a phrase search, we can connect two terms at a time, the left and right one. Searching by "mary had a little lamb" will result in searching by:
 
 * `"mary"` and `"had"` = `"mary had"`
 * `"mary had"` and `"a"` = `"mary had a"`
 * ...
 
-So we reuse the work done the previous step, just connect the right term with the previous. Imagine the scenario where `"mary had"` occurs in the following positions: `[1, 6]` and `"a"` appers in the position `[2]`, so `"mary had a"` occurs in the positions `[2]`, we keep doing this for the next token until we finish it.
+So we reuse the work done in the previous step, by connecting the right term with the previous one. Imagine the scenario where `"mary had"` occurs in the following positions: `[1, 6]` and `"a"` appears in the position `[2]`, so `"mary had a"` occurs in the positions `[2]`. We keep doing this for the next token until we finish it.
 
-The main idea to recreate and optimize this behaviour was taken from [`Roaring Bitmaps`](https://roaringbitmap.org/), that's why it's called `Roaringish`. We want to pack as much data as possible and avoid storing the positions for each document for each term separatly.
+The main idea to recreate and optimize this behavior was taken from [`Roaring Bitmaps`](https://roaringbitmap.org/), which is why it's called `Roaringish`. We want to pack as much data as possible and avoid storing the positions for each document for each term separately.
 
-Assuming that the `pos <= 2^16 * 16 = 1048576` (i.e the maximum document length is 1048576 tokens which is very reasonable, it's way more than [Meilisearch for example](https://www.meilisearch.com/docs/learn/resources/known_limitations#maximum-number-of-words-per-attribute), so this should be fine) allows us to decompose this value into two 16 bits, one representing the group and other the value, where `pos = group * 16 + value`
+Assuming that the `pos <= 2^16 * 16 = 1048576` (i.e. the maximum document length is 1048576 tokens, which is very reasonable, it's way more than [Meilisearch for example](https://www.meilisearch.com/docs/learn/resources/known_limitations#maximum-number-of-words-per-attribute), so this should be fine) allows us to decompose this value into two 16 bits, one representing the group and the other the value, where `pos = group * 16 + value`.
 
 ```python
 posns  =              [1, 5, 20, 21, 31, 100, 340]
@@ -117,7 +117,7 @@ groups = posns // 16 #[0, 0,  1,  1,  1,   6,  21]
 values = posns %  16 #[1, 5,  4,  5, 15,   4,   4]
 ```
 
-Since `value < 15`, we can pack even more data by bitwising each group value into single 16 bit number
+Since `values < 15`, we can pack even more data by bitwising each value of the same group into single 16 bit number
 
 ```
 Group 0             Group 1            ...   Group 21
@@ -125,19 +125,18 @@ Group 0             Group 1            ...   Group 21
 (bits 1 and 5 set)  (bits 4, 5, 15 set)      
 ```
 
-With this we can pack the group and the values in a single 32 bit number, by shifting the group and or it with the packed values i.e `group_value = (group << 16) | values`.
+With this, we can pack the group and the values into a single 32-bit number by shifting the group and OR-ing it with the packed values, i.e. `group_value = (group << 16) | values`.
 
 ```
 Group 0                              | Group 1                               ...    | Group 21
 0000000000000000 0000000000100010    | 0000000000000001 1000000000110000     ...    | 0000000000010101 0000000000010000
 (group 0)        (bits 1 and 5 set)  | (group 1)        (bits 4, 5, 15 set)  ...    | (group 21)       (bit 4 set)
 ```
-
 Now to find if the left token is followed by the right token we can:
-1. Intersect the MSB's (group part)
+1. Intersect the MSBs (group part)
 2. `Shift left` the LSB bits from the left token by 1 (values part)
-3. `And` the LSB's
-4. If there is at least one bit set in the LSB's after the `and` the left token is followed by the right token
+3. `And` the LSBs
+4. If there is at least one bit set in the LSBs after the `and`, the left token is followed by the right token
 
 For example, let's assume the term "little" has the following positions.
 ```
@@ -157,20 +156,20 @@ The group 21 is in the intersection, so:
 
 With this "little lamb" is found in group 21 value 3, i.e `21*16+3 = 339`.
 
-And the magical part is: To avoid having to analyze one document at the time we can pack the document id (assuming 32 bit document id) into the 32 MSB of a 64 bit number, while the LSB are the group and value. `packed = (doc_id << 32) | group_value`
+And the magical part is: To avoid having to analyze one document at a time, we can pack the document id (assuming a 32-bit document id) into the 32 MSB of a 64-bit number, while the LSB are the group and value. `packed = (doc_id << 32) | group_value`.
 
-When calculating the intersection we take the document id and group (48 MSB's), with this we can search the whole index in a single shot. So in the end we have a single continuous array of data, with all document ids and positions that contain that token.
+When calculating the intersection, we take the document id and group (48 MSBs). With this, we can search the whole index in a single shot. So in the end, we have a single continuous array of data, with all document ids and positions that contain that token.
 
-Pretty f* cool.
+Pretty cool.
 
-**Note:** For those who are paying attention you might have spotted a problem, we will talk about this later.
+**Note:** For those who are paying attention, you might have spotted a problem. We will talk about this later.
 
 # How my version works ?
-The idea behind my implementation is kinda similiar, but with a lot of extra steps, here we have a super brief overview on how it all works, later we will explore each step in depth.
+The idea behind my implementation is similar, but with a lot of extra steps. Here we have a brief overview of how it all works, and later we will explore each step in depth.
 
 ![](/assets/2025-01-13-using-the-most-unhinged-avx-512-instruction-to-make-the-fastest-phrase-search-algo/diagram0.png)
 
-Step `1` and `2` are here to help us reduce as much as possible the time spent on step `3`, since it's the most expensive one. So both of them try to be smart and find the best pattern for us to tackle the same problem, by reducing the search space.
+Steps `1` and `2` are here to help us reduce as much as possible the time spent on step `3`, since it's the most expensive one. Both of them try to be smart and find the best pattern for us to tackle the same problem by reducing the search space.
 
 Most of our time will be spent on step `3`, but step `1` is pretty cool.
 
@@ -299,39 +298,39 @@ fn search<I: Intersect>(
 {% enddetails %}
 <br/>
 
-So you might have noticed that the intersection is composed of two phases, why is that ? There is an annoying issue with Roaringish is due to the edge case where value bits are in the boundary of the group and calculating the intersection would lead to an incorrect result (that's the issue mentioned above). For example:
+So you might have noticed that the intersection is composed of two phases. Why is that? There is an annoying issue with Roaringish due to the edge case where value bits are on the boundary of the group, and calculating the intersection would lead to an incorrect result (that's the issue mentioned above). For example:
 ```
 t_0: Group 0                            t_1: Group 1
      0000000000000000 1000000000000000       0000000000000001 0000000000000001
 ```
 
-It's obvious in this example that `t_0` is followed by `t_1`, but the conventional intersection would fail in this case. So to solve this I decided to do the intersection in two passes, the first calculates "normal" intersection and the second this annoying edge case.
+It's obvious in this example that `t_0` is followed by `t_1`, but the conventional intersection would fail in this case. To solve this, I decided to do the intersection in two passes: the first calculates the "normal" intersection, and the second handles this annoying edge case.
 
-**Note:** I don't know how Doug solved this, I haven't checked the code. But this issue is mentioned in the article.
+**Note:** I don't know how Doug solved this. I haven't checked the code. But this issue is mentioned in the article.
 
 # Use your indexing time wisely
-In the field of Information Retrieval and Databases one way to reduce the search/query time is to pre calculate more during indexing/data ingestion.
+In the field of Information Retrieval and Databases, one way to reduce the search/query time is to pre-calculate more during indexing/data ingestion.
 
 One of the techniques that I used very early on in the making of this project is merging tokens during indexing (similar to [n-grams](https://en.wikipedia.org/wiki/N-gram)).
 
-I had a few constraints when implementing this: final index size, memory consumption while indexing and indexing time, I wanted to minimize all of them.
+I had a few constraints when implementing this: final index size, memory consumption while indexing, and indexing time. I wanted to minimize all of them.
 
-**Why do I want to minimize those metrics ?** For the most time I developed this on a 16GB machine with a few hundred gigabytes left on disk, so I was very constrained in this sense. And for indexing time sice I'm developing I want to iterate fast, so if I need to re-index the whole thing it can't take a long time.
+**Why do I want to minimize those metrics?** For most of the time, I developed this on a 16GB machine with a few hundred gigabytes left on disk, so I was very constrained in this sense. And for indexing time, since I'm developing, I want to iterate fast, so if I need to re-index the whole thing, it can't take a long time.
 
-**Note:** If you look at the source code on Github you will see that my indexing to this day is done on a single thread, the reason is that I can easily achive a high memory consuption on a sinle thread. The reason why it consumes so much memory is that most of the indexing is done and cached on RAM to be as fast as possible, indexing this 3.2M documents only takes around 30/35m on a single thread.
+**Note:** If you look at the source code on Github, you will see that my indexing to this day is done on a single thread. The reason is that I can easily achieve high memory consumption on a single thread. The reason why it consumes so much memory is that most of the indexing is done and cached in RAM to be as fast as possible. Indexing these 3.2M documents only takes around 30/35 minutes on a single thread.
 
-## How to solve this problem ?
-The idea is to only merge common tokens, and you might ask: "what is a common token ?" Well it's simple they are the tokens that appear the most in the collection. You can specify how many of the top tokens to consider as common ones, or as a percentage. I arbitrarily chose the top 50 tokens. There is also a parameter of the maximum sequence length, in this case I used 3.
+## How to solve this problem?
+The idea is to only merge common tokens. You might ask: "What is a common token?" Well, it's simple: they are the tokens that appear the most in the collection. You can specify how many of the top tokens to consider as common ones, or as a percentage. I arbitrarily chose the top 50 tokens. There is also a parameter for the maximum sequence length, in this case, I used 3.
 
-Increasing this two parameters will make the index size, indexing memory consumption and indexing time grow, so it's a careful balance. But the more you compute at indexing time the better, if you can afford more go for it.
+Increasing these two parameters will make the index size, indexing memory consumption, and indexing time grow, so it's a careful balance. But the more you compute at indexing time, the better. If you can afford more, go for it.
 
 The good thing about merging common tokens is that they are the most expensive in general to compute the intersection, so removing them makes things a lot faster.
 
-Here is and example, where `C_n` is a common token and `R_n` is a rare token (rare tokens are all of the other tokens that are not common).
+Here is an example, where `C_n` is a common token and `R_n` is a rare token (rare tokens are all of the other tokens that are not common).
 
 `C_0 R_1 C_2 C_3 C_4 R_5 R_6 ... R_x C_y R_z ...`
 
-This sequece of tokens will generate the following tokens and positions:
+This sequence of tokens will generate the following tokens and positions:
 ```
 C_0: 0
 C_0 R_1: 0
@@ -356,28 +355,28 @@ C_y R_z: y
 R_z: z
 ```
 
-Doing this allows us to reduce the number of intersections done at search time. 
+Doing this allows us to reduce the number of intersections done at search time.
 
-**Why are you merging up to one rare token at the begining or at the end ?** Let's consider that someone searched for `C_0 R_1 C_2 C_3`. If we don't do this merge we would end up searching for `C_0`, `R_1`, `C_2 C_3` and this is bad, as established intersecting common tokens is a problem so it's way better to search `C_0 R_1`, `C_2 C_3`. I learned this the hard way...
+**Why are you merging up to one rare token at the beginning or at the end?** Let's consider that someone searched for `C_0 R_1 C_2 C_3`. If we don't do this merge, we would end up searching for `C_0`, `R_1`, `C_2 C_3`, and this is bad. As established, intersecting common tokens is a problem, so it's way better to search `C_0 R_1`, `C_2 C_3`. I learned this the hard way...
 
 This brings us to the next topic that is done only at search time, the **minimization** step.
 
 # Dynamic Programming in the wild
-Let's use the same example as above, but this time the person searched for `R_1 C_2 C_3 C_4 R_5`. Since we have all possible combinations from the merge phase we can be smart and try to predict which combination of this tokens will take less time to be intersected. 
+Let's use the same example as above, but this time the person searched for `R_1 C_2 C_3 C_4 R_5`. Since we have all possible combinations from the merge phase, we can be smart and try to predict which combination of these tokens will take less time to be intersected.
 
-At search time we can be greedy while merging, but this might not lead to the fastest intersection combination of tokens. In the greedy version we will compute the intersection of `R_1 C_2 C_3`, `C_4 R_5`, but it might be better to compute `R_1`, `C_2 C_3 C_4`, `R_5` or `R_1 C_2`, `C_3 C_4 R_5` and so on...
+At search time, we can be greedy while merging, but this might not lead to the fastest intersection combination of tokens. In the greedy version, we will compute the intersection of `R_1 C_2 C_3`, `C_4 R_5`, but it might be better to compute `R_1`, `C_2 C_3 C_4`, `R_5` or `R_1 C_2`, `C_3 C_4 R_5` and so on...
 
-It's 100% worth spending time here before computing the intersection, I learned this the hard way...
+It's 100% worth spending time here before computing the intersection. I learned this the hard way...
 
-Does this look like some kind of problem to you ? Yes **Dynamic Programming**, sometimes this problems appear in the wild, so yes Leet Code is not a lie (I don't like Leet Code).
+Does this look like some kind of problem to you? Yes, **Dynamic Programming**. Sometimes these problems appear in the wild, so yes, LeetCode is not a lie (I don't like LeetCode).
 
-How can we solve this ? First let's list what we need to do:
+How can we solve this? First, let's list what we need to do:
 * List all possible combinations of tokens (in a smart way)
 * Estimate the cost of the intersection for that combination (in a smart way).
 
-Yeah this is expensive... Usually when you find a DP problem in the wild what do you do ? Google a solution for it, in my case this wasn't a possibility, I have created this problem, so now I need to solve it.
+Yeah, this is expensive... Usually, when you find a DP problem in the wild, what do you do? Google a solution for it. In my case, this wasn't a possibility. I created this problem, so now I need to solve it.
 
-It didn't take too long to for me to get a solution, since the algo isn't that hard. We can also di use some memoization to amortize the cost. Here is the POC I wrote in python (very porly optimized) while trying to find a solution for this problem.
+It didn't take too long for me to get a solution since the algorithm isn't that hard. We can also use some memoization to amortize the cost. Here is the POC I wrote in Python (very poorly optimized) while trying to find a solution for this problem.
 
 ```python
 # arr: tokens
@@ -410,17 +409,17 @@ def minimize(arr, scores, N):
     return (final_score, choices)
 ```
 
-This version is very simple, it doesn't do the correct merging of tokens nor has any optimization/memoization, but what is important is the idea. As said previously we want to mimize the cost/score, since intersection is computed in `O(n+m)` that's what we are aiming to minimize, there is another approches to the cost function like trying to find the combination that leads to the smallest possible of a single token.
+This version is very simple, it doesn't do the correct merging of tokens nor has any optimization/memoization, but what is important is the idea. As said previously, we want to minimize the cost/score, since intersection is computed in `O(n+m)` that's what we are aiming to minimize. There are other approaches to the cost function, like trying to find the combination that leads to the smallest possible size of a single token.
 
-Let's do an example on how this works, since in here we just merge tokens without caring if they are common or rare, let's assume the following query `t_0 t_1 t_2 t_3 t_4`:
+Let's do an example of how this works. Since here we just merge tokens without caring if they are common or rare, let's assume the following query `t_0 t_1 t_2 t_3 t_4`:
 
-For each call of the function we loop over all possible merges of the remaining tokens. So we get the cost for the token `t_0 t_1 t_2` and call the function recursively for `t_3 t_4` and so on. The call graph would look like this:
+For each call of the function, we loop over all possible merges of the remaining tokens. So we get the cost for the token `t_0 t_1 t_2` and call the function recursively for `t_3 t_4` and so on. The call graph would look like this:
 
 ![](/assets/2025-01-13-using-the-most-unhinged-avx-512-instruction-to-make-the-fastest-phrase-search-algo/callstack.png)
 
-As you can see there is a lot of repeated work being done, that's why memoization is needed, also reducing the recursion depth helps. So in the final Rust version I did exacltly that, but trying my best to optimize this, also I needed to respect how the merge of tokens work.
+As you can see, there is a lot of repeated work being done, that's why memoization is needed. Also, reducing the recursion depth helps. So in the final Rust version, I did exactly that, but tried my best to optimize this, also I needed to respect how the merge of tokens works.
 
-If you are going to read the following code, you can just ignore all of the cosnt generics, they are not important for your understanding...
+If you are going to read the following code, you can just ignore all of the const generics, they are not important for your understanding...
 
 {% details **Code** for merge and minimize **(you can ignore if you want)** %}
 ```rust
@@ -714,32 +713,30 @@ fn merge_and_minimize_tokens<'a, 'b, 'alloc>(
 {% enddetails %}
 <br/>
 
-This code is kinda long and convoluted (also ugly IMHO), so I will not go through it, but there is a few things I would like to talk about it. For a long time the implementation was much more naive and simple and this was enough for a long time, until the point where other parts became way more optimized and this started being the bottleneck specially for long queries.
+This code is kinda long and convoluted (also ugly IMHO), so I will not go through it, but there are a few things I would like to talk about. For a long time, the implementation was much more naive and simple, and this was enough until other parts became way more optimized, and this started being the bottleneck, especially for long queries.
 
-So don't optimize things that are not your bottleneck, until they become it.
+So don't optimize things that are not your bottleneck until they become it.
 
-The input tokens in the original version was a `&[&str]` and the memoization was still done using a `HashMap` and this is bad, since the token sequence is the key of the hashmap. Hashing strings is already slow enough, now hashing multiple strings and combining these hashes is ridiculously slow. I used [flamegraph](https://github.com/flamegraph-rs/flamegraph) to find this bottleneck, also another thing that I noticed was a lot of time was being spent on allocations.
+The input tokens in the original version were a `&[&str]`, and the memoization was still done using a `HashMap`, which is bad since the token sequence is the key of the hashmap. Hashing strings is already slow enough, but hashing multiple strings and combining these hashes is ridiculously slow. I used [flamegraph](https://github.com/flamegraph-rs/flamegraph) to find this bottleneck. Another thing I noticed was that a lot of time was being spent on allocations.
 
-To fix both of this problems I decided to be a little bit smarter, since allocations in this case are all tied to the lifetime of the `merge_and_minimize_tokens` function we can just put everything into a [bump/arena allocator](https://github.com/fitzgen/bumpalo) and free it together when finished.
+To fix both of these problems, I decided to be a little bit smarter. Since allocations in this case are all tied to the lifetime of the `merge_and_minimize_tokens` function, we can just put everything into a [bump/arena allocator](https://github.com/fitzgen/bumpalo) and free it together when finished.
 
-Also putting things into the same bump allocator allows use to more easily manipulate the lifetimes to our own will. That's why we the `'alloc` lifetime.
+Also, putting things into the same bump allocator allows us to more easily manipulate the lifetimes to our own will. That's why we have the `'alloc` lifetime.
 
-The type `RefTokens` is a type that holds a "list of tokens", but it's just a lie, what we hold is the original string and a list of pairs, begin and end index of each token, we can use this to slice the original string and have the "list of tokens", this is helpful because now the hash function can be implemented around this fact, so in the end we are just hashing a single string. The `'a` lifetime is the lifetime of the original query string.
+The type `RefTokens` is a type that holds a "list of tokens", but it's just a lie. What we hold is the original string and a list of pairs, the beginning and end index of each token. We can use this to slice the original string and have the "list of tokens". This is helpful because now the hash function can be implemented around this fact, so in the end, we are just hashing a single string. The `'a` lifetime is the lifetime of the original query string.
 
-And finally we have `RefTokenLinkedList`, we are basically creating a liked list of `RefTokens`s which will represent the final merge of the tokens. If you look closely to this type declaration it accepts `'a` and `'alloc` and that's why using a bump allocator makes things easier, the next reference/pointer of the linked list is of type `Option<&'alloc RefTokenLinkedList<'a, 'alloc>>`. So when someone says to you that is hard to make a linked list in Rust now you know that it's not /s.
+And finally, we have `RefTokenLinkedList`. We are basically creating a linked list of `RefTokens`, which will represent the final merge of the tokens. If you look closely at this type declaration, it accepts `'a` and `'alloc`, and that's why using a bump allocator makes things easier. The next reference/pointer of the linked list is of type `Option<&'alloc RefTokenLinkedList<'a, 'alloc>>`. So when someone says to you that it's hard to make a linked list in Rust, now you know that it's not /s.
 
-I usually go with [AHash](https://github.com/tkaitchuck/ahash) as my hash function in Rust (and for a long time it was used in this function), but this time I decided to experiment [GxHash](https://github.com/ogxd/gxhash) and it was plesantly surprised that it was faster, I will take this easy win.
+I usually go with [AHash](https://github.com/tkaitchuck/ahash) as my hash function in Rust (and for a long time it was used in this function), but this time I decided to experiment with [GxHash](https://github.com/ogxd/gxhash), and I was pleasantly surprised that it was faster. I will take this easy win.
 
-One other small optimization that we can make is reduce the size of the call graph by checking things before calling the function again.
+One other small optimization that we can make is to reduce the size of the call graph by checking things before calling the function again.
 
-This changes made this procedure way, way faster. Where it's not the main bottleneck for large queries and probably will never be ever be. We can merge an minimize a query of 1000 tokens in `55us`, so pretty fast.
+# You are only as good as your reverse index
+No optimization will save you from having a poor reverse index implementation, so just like when you go to the gym and want to skip leg day, don't skip on the technologies and structure of your index.
 
-# You are just as good as your reverse index
-No optimization will save you from having a poor reverse index implementation, so just like when you go to the gym and want to skip leg day, don't skip in the technologies and structure of your index.
+My reverse index, like any other part, has gone through drastic changes during development (that's why having a low index time is good). But there are two pieces of technology that were the heart and soul in every version: [heed](https://github.com/meilisearch/heed) ([LMDB](http://www.lmdb.tech/doc/)) and [rkyv](https://github.com/rkyv/rkyv). A special shoutout to the creator of rkyv ([David Koloski](https://github.com/djkoloski)), a super helpful person who released the 0.8.X version that allowed me to use the unaligned feature and is super active on their discord, helping people by answering questions and fixing bugs in minutes when they are reported.
 
-My reverse index as any other part has gone through dramastic changes during development (that's why having a low index time is good). But there are two pieces of technologies that were the heart and soul in every version: [heed](https://github.com/meilisearch/heed) ([LMDB](http://www.lmdb.tech/doc/)) and [rkyv](https://github.com/rkyv/rkyv). But a special shoutout for the creator of rkyv ([David Koloski](https://github.com/djkoloski)), a super helpful person that released the 0.8.X version that allowed me to use the unaligned feature and is super active on their discord helping people by answering questions and fixing bugs in minutes when they are reported.
-
-Now let's go through the structure of my reverse index, we have 3 databases, that's it. Simple and effective. The first database holds some metadata about the index, the other holds the internal document id to the document it self and the third hold the token to the Roaringish Packed (continous block of memory of `u64`s (`u32` for the doc id, `u16` for the index and `u16` for the values as discussed up above)).
+Now let's go through the structure of my reverse index. We have 3 databases, that's it. Simple and effective. The first database holds some metadata about the index, the second holds the internal document id to the document itself, and the third holds the token to the Roaringish Packed (continuous block of memory of `u64`s (`u32` for the doc id, `u16` for the index, and `u16` for the values as discussed above)).
 
 Let's take a look at the signature of the `index` function:
 ```rust
@@ -753,21 +750,21 @@ where
 {}
 ```
 
-What is importante is the type of `docs` which is an iterator that basically returns a tuple `(&str, D)` where the first is the content of the document and `D` (as long as `D` is serializable by rkyv) is the stored version of the document. So this two can be different and that's cool and you might ask why ?
+What is important is the type of `docs`, which is an iterator that returns a tuple `(&str, D)`, where the first element is the content of the document and `D` (as long as `D` is serializable by rkyv) is the stored version of the document. These two can be different, and you might ask why?
 
-Imagine the scenario where you want to index a bunch of text documents that are in your hard drive, but want to save disk space, so instead of saving the content of the documents in the db when you call the `index` function, passing the content the document and the path of the document as the type `D`, this way you just save the path of the file that has the specified content.
+Imagine a scenario where you want to index a bunch of text documents on your hard drive but want to save disk space. Instead of saving the content of the documents in the database when you call the `index` function, you pass the content of the document and the path of the document as the type `D`. This way, you just save the path of the file that has the specified content.
 
-This is just one example, imagine if you have things stored in a external db and just need to save the id...
+This is just one example. Imagine if you have things stored in an external database and just need to save the ID...
 
-So remember a few paragraphs above where I said that the third database saves the token to the Roaringish Packed ? I kinda lied to you, sorry... In reality we have an extra moving part, but not because I want, but I couldn't figure it out how to make heed behave the way I want.
+So remember a few paragraphs above where I said that the third database saves the token to the Roaringish Packed? I kinda lied to you, sorry... In reality, we have an extra moving part, not because I want it, but because I couldn't figure out how to make heed behave the way I want.
 
-For the special souce of this blog post (we will get there in the future, bear with me) I need that the continous block that represents the Roaringish Packed to be aligned to a 64 byte boundary, but you can't enforce this with LMDB and consequently heed. I really tried, but when you insert things into the DB f* the alignment of the rest of the values, so it doesn't work trying to insert things already aligned.
+For the fun part of this blog post (we will get there in the future, bear with me), I need the continuous block that represents the Roaringish Packed to be aligned to a 64-byte boundary, but you can't enforce this with LMDB and consequently heed. I really tried, but when you insert things into the DB, it messes up the alignment of the rest of the values, so it doesn't work trying to insert things already aligned.
 
-Fixing this isn't hard if we add an additional big file that has all of the Roaringish Packed aligned to 64 byte boundary. So in the LMDB we only store an offset and length. But how we align the data ?
+Fixing this isn't hard if we add an additional big file that has all of the Roaringish Packed aligned to a 64-byte boundary. So in the LMDB, we only store an offset and length. But how do we align the data?
 
-This file will be [mmaped](https://man7.org/linux/man-pages/man2/mmap.2.html), so it's guarantee to be page aligned (4k), with this we know the alignment of the base of the file when constructing it, so we just pad some bytes before the begining of the next Roaringish Packed if needed.
+This file will be [mmaped](https://man7.org/linux/man-pages/man2/mmap.2.html), so it's guaranteed to be page-aligned (4k). With this, we know the alignment of the base of the file when constructing it, so we just pad some bytes before the beginning of the next Roaringish Packed if needed.
 
-Also another small optimization that I thought it would make a bigger difference is to [madivese](https://man7.org/linux/man-pages/man2/madvise.2.html) the retrieved range as sequential read.
+Also, another small optimization that I thought would make a bigger difference is to [madvise](https://man7.org/linux/man-pages/man2/madvise.2.html) the retrieved range as sequential read.
 
 {% details **Code** for retrieving the Roaringish Packed from the index **(you can ignore if you want)** %}
 ```rust
@@ -801,16 +798,16 @@ fn get_roaringish_packed_from_offset<'a>(
 {% enddetails %}
 <br/>
 
-You might ask: **Is it safe to align to `u64`** ? And the answer is yes, if the file is properly constructed it should this should be 64 byte aligned which is bigger than the 8 byte alignment needed for `u64`. Also checking if `l` and `r` are empty helps us ensure that everything is working properly.
+You might ask: **Is it safe to align to `u64`?** And the answer is yes, if the file is properly constructed, it should be 64-byte aligned, which is bigger than the 8-byte alignment needed for `u64`. Also, checking if `l` and `r` are empty helps us ensure that everything is working properly.
 
 # We can still be smarter
-At this point we have the merged and minimized tokens with their respectives Roaringish Packed, so in theory we have everything needed to start intersecting them right ? Right, but... If I tell you that we can still try to reduce our search space, by doing something that I called smart execution.
+At this point, we have the merged and minimized tokens, so in theory, we have everything needed to start intersecting them, right? Right, but... What if I tell you that we can still try to reduce our search space by doing something that I call smart execution?
 
-Similar to the minimize step we can reduce the number of computed intersections, but in this cases we are just changing the order that we compute the intersections. Since this operation is associative (but not commutative) we can group/start the computation at any point and achieve the same result.
+Similar to the minimize step, we can reduce the number of computed intersections, but in this case, we are just changing the order in which we compute the intersections. Since this operation is associative (but not commutative), we can group/start the computation at any point and achieve the same result.
 
-But in this case we can't be so aggresive as the minimize step, because the score would be the final size of the intersection (we only have an upper bound) and to know this we need to compute the intersection it self.
+However, in this case, we can't be as aggressive as the minimize step because the score would be the final size of the intersection (we only have an upper bound), and to know this, we need to compute the intersection itself.
 
-With this in mind be can me a little bit more naive, but still be good enough: start intersecting by the pair that leads to the smallest sum of lengths (we could also start by the token that has the smallest Roaringish Packed length and intersect with the smallest adjecent, but I prefer the first option).
+With this in mind, we can be a little bit more naive but still good enough: start intersecting by the pair that leads to the smallest sum of lengths (we could also start with the token that has the smallest Roaringish Packed length and intersect with the smallest adjacent, but I prefer the first option).
 
 ```rust
 let mut min = usize::MAX;
@@ -840,7 +837,7 @@ let mut left_i = i.wrapping_sub(1);
 let mut right_i = i + 2;
 ```
 
-Just loop over every adjecent pair and compute the sum of the lengths and use the smallest as the starting point. After this we intersect with the left or right token depeding which has the smallest size.
+Just loop over every adjacent pair and compute the sum of the lengths and use the smallest as the starting point. After this we intersect with the left or right token depeding which has the smallest size.
 
 ```rust
 loop {
@@ -944,14 +941,14 @@ loop {
 {% enddetails %}
 <br/>
 
-This leads to another huge win, specially for queries that have a super rare token in the middle of it, this cuts the search space by a lot, making every single subsequent intersection faster.
+This leads to another huge win, especially for queries that have a super rare token in the middle of it. This cuts the search space by a lot, making every single subsequent intersection faster.
 
 # Here begins the fun
-Now that the boring stuff is past us, let's start the fun part... Again just as a reminder on how the intersection works: we do two phases of intersection, one for the conventional intersection and other for the bits that would cross the group boundary and in the end we merge this two.
+Now that the boring stuff is behind us, let's start the fun part. Again, just as a reminder on how the intersection works: we do two phases of intersection, one for the conventional intersection and another for the bits that would cross the group boundary, and in the end, we merge these two.
 
-In this section we will take a look at assembly, some cool tools to analyze this assembly, Simd (AVX512), differences in microarchitecture of AMD and Intel chips, emulation of instructions and a lot more. So again sorry to bother you with all of the previous stuff, but it was important.
+In this section, we will take a look at assembly, some cool tools to analyze this assembly, AVX-512, differences in the microarchitecture of AMD and Intel chips, emulation of instructions, and a lot more. So again, sorry to bother you with all of the previous stuff, but it was important.
 
-For you better understanding on how the two intersection phases work, let's start with the naive version and build our way to the Simd one.
+For your better understanding of how the two intersection phases work, let's start with the naive version and build our way to the simd one.
 
 The intersection used by the search function is a generic, and the type needs to implement the `Intersect` trait.
 
@@ -1040,13 +1037,13 @@ trait Intersect {
 }
 ```
 
-As you can see the `intersect` and `inner_intersect` have a const generic that condionally enables code depending on the intersection phase.
+As you can see, the `intersect` and `inner_intersect` functions have a const generic that conditionally enables code depending on the intersection phase.
 
-**Note:** You might not like this, but I personally perfer having this constant flag than duplicating a bunch of code.
+**Note:** You might not like this, but I personally prefer having this constant flag rather than duplicating a bunch of code.
 
-The `intersect` function is pre implemented and is respossible for allocating the result buffers, if you look closely `msb_packed_result` have 0 capacity on the second phase, the reason is that the first phase is responsible for the normal intersection + finding the candidates for the second intersection phase and they are saved in the `msb_packed_result`, that's why we don't need this variable in the second pass.
+The `intersect` function is pre-implemented and is responsible for allocating the result buffers. If you look closely, `msb_packed_result` has 0 capacity in the second phase. The reason is that the first phase is responsible for the normal intersection and finding the candidates for the second intersection phase, which are saved in the `msb_packed_result`. That's why we don't need this variable in the second pass.
 
-Another funny thing you might have noticed is the `Aligned64` type. Like the values retrieved from the mmap I need this to be 64 byte aligned, one easy way to solve this is to specify a custom allocator for the container. In this case I created an allocator that changes the alignment of the inner type to be whatever I want, here is the code.
+Another funny thing you might have noticed is the `Aligned64` type. Like the values retrieved from the mmap, I need this to be 64-byte aligned. One easy way to solve this is to specify a custom allocator for the container. In this case, I created an allocator that changes the alignment of the inner type to be whatever I want. Here is the code.
 
 ```rust
 #[derive(Default)]
@@ -1076,19 +1073,19 @@ type Aligned64 = AlignedAllocator<64>;
 ```
 
 {% details **Explanation** on why I use `Box<[MaybeUninit<T>]` **(you can ignore if you want)** %}
-You might also have noticed something different: **Why am I not using `Vec` ?** Because it's bad... I'm kidding it's not bad, but it makes the life of the compiler harder when optimizing, specially because I know the upper bound of my buffers I can pre allocate them. But again you might **Why are you not using `Vec::with_capacity` ?** Because the compiler is dumb, even if you specify the capacity, when pushing elements it will create a branch instruction (pretty bad).
+You might also have noticed something different: **Why am I not using `Vec`?** Because it's bad... I'm kidding, it's not bad, but it makes the life of the compiler harder when optimizing, especially because I know the upper bound of my buffers, I can pre-allocate them. But again, you might ask **Why are you not using `Vec::with_capacity`?** Because the compiler is dumb, even if you specify the capacity, when pushing elements it will create a branch instruction (pretty bad).
 
-Look at the following [assembly for each function](https://godbolt.org/#g:!((g:!((g:!((h:codeEditor,i:(filename:'1',fontScale:14,fontUsePx:'0',j:1,lang:rust,paneName:'Editor+%231',selection:(endColumn:18,endLineNumber:13,positionColumn:18,positionLineNumber:13,selectionStartColumn:8,selectionStartLineNumber:13,startColumn:8,startLineNumber:13),source:'%23!!%5Bfeature(vec_push_within_capacity)%5D%0A%0A%23%5Bno_mangle%5D%0Apub+fn+vec_with_capacity(cap:+usize)+-%3E+Vec%3Cu32%3E+%7B%0A++++let+mut+v+%3D+Vec::with_capacity(cap)%3B%0A++++for+_+in+0..cap+%7B%0A++++++++v.push(10)%3B%0A++++%7D%0A++++v%0A%7D%0A%0A%23%5Bno_mangle%5D%0Apub+fn+box_uninit(cap:+usize)+-%3E+Vec%3Cu32%3E+%7B%0A++++let+mut+v+%3D+Box::new_uninit_slice(cap)%3B%0A++++for+i+in+v.iter_mut()+%7B%0A++++++++i.write(10)%3B%0A++++%7D%0A++++Vec::from(unsafe+%7B+v.assume_init()+%7D)%0A%7D%0A%0A%0A%23%5Bno_mangle%5D%0Apub+fn+vec_within_capacity(cap:+usize)+-%3E+Vec%3Cu32%3E+%7B%0A++++let+mut+v+%3D+Vec::with_capacity(cap)%3B%0A++++for+_+in+0..cap+%7B%0A++++++++unsafe+%7B+%0A++++++++++++v%0A++++++++++++.push_within_capacity(10)%0A++++++++++++.unwrap_unchecked()%3B+%0A++++++++%7D%0A++++%7D%0A++++v%0A%7D'),l:'5',n:'0',o:'Editor+%231',t:'0')),k:42.77886497064579,l:'4',m:34.54182951670623,n:'0',o:'',s:0,t:'0'),(g:!((h:compiler,i:(compiler:nightly,filters:(b:'0',binary:'1',binaryObject:'1',commentOnly:'0',debugCalls:'1',demangle:'0',directives:'0',execute:'1',intel:'0',libraryCode:'0',trim:'1',verboseDemangling:'0'),flagsViewOpen:'1',fontScale:14,fontUsePx:'0',j:1,lang:rust,libs:!(),options:'-C+opt-level%3D3',overrides:!(),paneName:'Source+%231',selection:(endColumn:1,endLineNumber:1,positionColumn:1,positionLineNumber:1,selectionStartColumn:1,selectionStartLineNumber:1,startColumn:1,startLineNumber:1),source:1),l:'5',n:'0',o:'Source+%231',t:'0'),(h:cfg,i:(compilerName:'rustc+nightly',editorid:1,j:1,paneName:'Graph+%231',selectedFunction:'vec_with_capacity:',treeid:0),l:'5',n:'0',o:'Graph+%231',t:'0')),header:(),k:57.22113502935421,l:'4',n:'0',o:'',s:1,t:'0')),l:'2',m:100,n:'0',o:'',t:'0')),version:4) `vec_with_capacity`, `box_uninit` and `vec_within_capacity` (you can change the function by clicking on the to left the tab (besides the **Export** button)), all of the loops are in the bottom right corner of the graph.
+Look at the following [assembly for each function](https://godbolt.org/#g:!((g:!((g:!((h:codeEditor,i:(filename:'1',fontScale:14,fontUsePx:'0',j:1,lang:rust,paneName:'Editor+%231',selection:(endColumn:18,endLineNumber:13,positionColumn:18,positionLineNumber:13,selectionStartColumn:8,selectionStartLineNumber:13,startColumn:8,startLineNumber:13),source:'%23!!%5Bfeature(vec_push_within_capacity)%5D%0A%0A%23%5Bno_mangle%5D%0Apub+fn+vec_with_capacity(cap:+usize)+-%3E+Vec%3Cu32%3E+%7B%0A++++let+mut+v+%3D+Vec::with_capacity(cap)%3B%0A++++for+_+in+0..cap+%7B%0A++++++++v.push(10)%3B%0A++++%7D%0A++++v%0A%7D%0A%0A%23%5Bno_mangle%5D%0Apub+fn+box_uninit(cap:+usize)+-%3E+Vec%3Cu32%3E+%7B%0A++++let+mut+v+%3D+Box::new_uninit_slice(cap)%3B%0A++++for+i+in+v.iter_mut()+%7B%0A++++++++i.write(10)%3B%0A++++%7D%0A++++Vec::from(unsafe+%7B+v.assume_init()+%7D)%0A%7D%0A%0A%0A%23%5Bno_mangle%5D%0Apub+fn+vec_within_capacity(cap:+usize)+-%3E+Vec%3Cu32%3E+%7B%0A++++let+mut+v+%3D+Vec::with_capacity(cap)%3B%0A++++for+_+in+0..cap+%7B%0A++++++++unsafe+%7B+%0A++++++++++++v%0A++++++++++++.push_within_capacity(10)%0A++++++++++++.unwrap_unchecked()%3B+%0A++++++++%7D%0A++++%7D%0A++++v%0A%7D'),l:'5',n:'0',o:'Editor+%231',t:'0')),k:42.77886497064579,l:'4',m:34.54182951670623,n:'0',o:'',s:0,t:'0'),(g:!((h:compiler,i:(compiler:nightly,filters:(b:'0',binary:'1',binaryObject:'1',commentOnly:'0',debugCalls:'1',demangle:'0',directives:'0',execute:'1',intel:'0',libraryCode:'0',trim:'1',verboseDemangling:'0'),flagsViewOpen:'1',fontScale:14,fontUsePx:'0',j:1,lang:rust,libs:!(),options:'-C+opt-level%3D3',overrides:!(),paneName:'Source+%231',selection:(endColumn:1,endLineNumber:1,positionColumn:1,positionLineNumber:1,selectionStartColumn:1,selectionStartLineNumber:1,startColumn:1,startLineNumber:1),source:1),l:'5',n:'0',o:'Source+%231',t:'0'),(h:cfg,i:(compilerName:'rustc+nightly',editorid:1,j:1,paneName:'Graph+%231',selectedFunction:'vec_with_capacity:',treeid:0),l:'5',n:'0',o:'Graph+%231',t:'0')),header:(),k:57.22113502935421,l:'4',n:'0',o:'',s:1,t:'0')),l:'2',m:100,n:'0',o:'',t:'0')),version:4) `vec_with_capacity`, `box_uninit` and `vec_within_capacity` (you can change the function by clicking on the top left tab (besides the **Export** button)), all of the loops are in the bottom right corner of the graph.
 
-The `vec_with_capacity` adds one big function call to `RawVec<T,A>::grow_one` (even though we are adding the same amount of elements as specified in the capacity), and if you look at the assembly of this function with have a branch. **Do you know what branching does to optimiziers ?** It messes with their ability to vectorize. If you look at `box_uninit` or `vec_within_capacity` the compiler even vectorized the loop for us.
+The `vec_with_capacity` adds one big function call to `RawVec<T,A>::grow_one` (even though we are adding the same amount of elements as specified in the capacity), and if you look at the assembly of this function, it has a branch. **Do you know what branching does to optimizers?** It messes with their ability to vectorize. If you look at `box_uninit` or `vec_within_capacity`, the compiler even vectorized the loop for us.
 
-I personally prefer the syntax of `box_uninit` that's why I use it instead of `vec_within_capacity` (it also requires a feature flag, even though that's not a problem).
+I personally prefer the syntax of `box_uninit`, that's why I use it instead of `vec_within_capacity` (it also requires a feature flag, even though that's not a problem).
 
-So here is the reason on why you are going to see `Box<[MaybeUninit<T>]` here on out.
+So here is the reason why you are going to see `Box<[MaybeUninit<T>]` here on out.
 {% enddetails %}
 <br/>
 
-The other resoposibility of the `intersect` function has something to do with the `lhs_len` parameter. Let's try to understand what this parameter means first. Assume the following token merger/minimization:
+The other responsibility of the `intersect` function has something to do with the `lhs_len` parameter. Let's try to understand what this parameter means first. Assume the following token merger/minimization:
 ```
 len:    50         10         5      40
 ...| t_0 t_1 | t_2 t_3 t_4 | t_5 | t_6 t_7 | ...
@@ -1096,26 +1093,26 @@ len:    50         10         5      40
                 Start intersecting here
 ```
 
-1. First intersection: `t_2 t_3 t_4` and `t_5`, the lhs token has a length of 3 and rhs has length 1. Let's save this into two temporary variables `temp_lhs_len = 3` and `temp_rhs_len = 1` and the parameter `lhs_len = temp_lhs_len`.
+1. First intersection: `t_2 t_3 t_4` and `t_5`, the lhs token has a length of 3 and rhs has a length of 1. Let's save this into two temporary variables `temp_lhs_len = 3` and `temp_rhs_len = 1` and the parameter `lhs_len = temp_lhs_len`.
     * This means that instead of left shifting by 1 we shift by 3 to calculate the intersection.
     * This is correct because the position of `t_2 t_3 t_4` is the same as `t_2` and we need to intersect it with a token that is after `t_3` and `t_4`.
 2. Second intersection: `t_2 t_3 t_4 t_5` and `t_6 t_7` in this case `lhs_len = temp_rhs_len` (which is 1), we add `temp_rhs_len` to `temp_lhs_len` (`temp_lhs_len += temp_rhs_len` (which is 4)), and make `temp_rhs_len = 2` (the length of `t_6 t_7`) (this will be used in the next intersection with the right token)
     * This is correct because after the first intersection the position of `t_2 t_3 t_4 t_5` is the same as `t_5` and the position of `t_6 t_7` is the same as `t_6`.
 3. Third intersection: `t_0 t_1` and `t_2 t_3 t_4 t_5 t_6 t_7`, at this point `temp_lhs_len = 4` so we add the length of the lhs token (2 in this case) making `temp_lhs_len = 6` and the parameter `lhs_len = temp_lhs_len`.
-    * This is correct because the position of `t_0 t_1` is the same as `t_0` and `t_2 t_3 t_4 t_5 t_6 t_7` has the same postion as `t_6` (not `t_7`) (the position after intersecting with a token to the right is the position of the first token of the rhs sequence)
+    * This is correct because the position of `t_0 t_1` is the same as `t_0` and `t_2 t_3 t_4 t_5 t_6 t_7` has the same position as `t_6` (not `t_7`) (the position after intersecting with a token to the right is the position of the first token of the rhs sequence)
 4. Repeat this for the rest of the lhs and rhs tokens.
 
-With this I hope the `lhs_len` parameter made sense. **So why do we need it ?** We can just devide this value by 16 (remembering that each group holds 16 values) to find how much we need to add to the group of lhs to match rhs (remembering that the intersection is done in the 48 MSB's, document id and group, so they need to be equal).
+With this, I hope the `lhs_len` parameter makes sense. **So why do we need it?** We can just divide this value by 16 (remembering that each group holds 16 values) to find how much we need to add to the group of lhs to match rhs (remembering that the intersection is done in the 48 MSBs, document id and group, so they need to be equal).
 
-And the remainder of this division tells us how much we need to shift the lhs values (16 LSB's) to intersect with the rhs ones. We also use this remainder to calculate two bit masks `msb_mask` and `lsb_mask` (we will talk about them later). For example is the remainder is 3, this masks will assume the following values (just keep them in mind): 
+And the remainder of this division tells us how much we need to shift the lhs values (16 LSBs) to intersect with the rhs ones. We also use this remainder to calculate two bit masks `msb_mask` and `lsb_mask` (we will talk about them later). For example, if the remainder is 3, these masks will assume the following values (just keep them in mind): 
 
 * `msb_mask = 0b11100000 00000000`
 * `lsb_mask = 0b00000000 00000111`
 
-With this we are ready to look at the naive intersection, yay !!
+Now we are ready to look at the naive intersection, yay!!
 
 ## Naive Intersection
-To more easily analyze the code of each intersection phase I will separate it two fictitious functions, but in the final code they are in the same function with the const generic flag.
+To more easily analyze the code of each intersection phase I will separate it into two fictitious functions, but in the final code, they are in the same function with the const generic flag.
 
 ### First Phase
 Here is the code for the first intersection phase:
@@ -1203,27 +1200,27 @@ impl Intersect for NaiveIntersect {
 }
 ```
 
-The code it self is not that hard to understand, so let's go through it.
+The code itself is not that hard to understand, so let's go through it.
 
-Imagine this loop as the basic intersection algo for two sorted arrays (and in our case they are sorted from lowest to highest document id and group) and like the convetional algo we increment the index of lhs or rhs depending which one is the smallest, if they are equal advance both (1/3 of the fuction already explained, noice).
+Imagine this loop as the basic intersection algorithm for two sorted arrays (in our case, they are sorted from lowest to highest document ID and group). Like the conventional algorithm, we increment the index of lhs or rhs depending on which one is the smallest. If they are equal, advance both (1/3 of the function already explained, nice).
 
-But our case as mentioned multiple times the intersection is done with only the 48 MSB's that's why we call the function `clear_values`, so we use the document id and group from the lhs (without forgetting to add to the group) and compare with the rhs one (2/3 done).
+But in our case, as mentioned multiple times, the intersection is done with only the 48 MSBs. That's why we call the function `clear_values`, so we use the document ID and group from the lhs (without forgetting to add to the group) and compare it with the rhs one (2/3 done).
 
 And to finish, let's analyze what we write into the output buffers (`packed_result` and `msb_packed_result`).
 
-If `lhs_doc_id_group == rhs_doc_id_group`
-* We compute the intersection of the values (similar to how the original implementation of Doug does, but in here we shift left by the remainder of the division).
-* This intersection can be 0, we could check with an if or do it branchless, but we can also check this during the merge phase, and that's what I decided to do (this makes our lifes in the Simd version easier).
-    * We could do two checks, one here and one in the merge, but there is no need/meaninful speed difference, so it's fine.
-* Write the or between `lhs_doc_id_group` and the `intersection` to `packed_result`.
-* We also do a branchless write only if the bits of lhs value would cross the group boundary when shifting (that's why we have the `msb_mask`), to save the work in the second phase we already add one to the group (the `msb_packed_result` is used in the second intersection phase as the lhs one).
+If `lhs_doc_id_group == rhs_doc_id_group`:
+* We compute the intersection of the values (similar to how the original implementation of Doug does, but here we shift left by the remainder of the division).
+* This intersection can be 0. We could check with an if statement or do it branchless, but we can also check this during the merge phase, and that's what I decided to do (this makes our lives in the simd version easier).
+    * We could do two checks, one here and one in the merge, but there is no need/meaningful speed difference, so it's fine.
+* Write the OR between `lhs_doc_id_group` and the `intersection` to `packed_result`.
+* We also do a branchless write only if the bits of lhs value would cross the group boundary when shifting (that's why we have the `msb_mask`). To save the work in the second phase, we already add one to the group (the `msb_packed_result` is used in the second intersection phase as the lhs one).
 
-The operation described above of writing to `msb_packed_result` is repeated when incrementing lhs index (the reason is that in the second phase we need to analyze all possible cases where the bits would cross the group boundary) (3/3 done).
+The operation described above of writing to `msb_packed_result` is repeated when incrementing the lhs index (the reason is that in the second phase, we need to analyze all possible cases where the bits would cross the group boundary) (3/3 done).
 
-And with that I hope now you know how the first phase of the naive intersection works.
+And with that, I hope now you know how the first phase of the naive intersection works.
 
 ### Second Phase
-Let's analyze the second phase now, it will be easier this time since we already now how phase one works.
+Let's analyze the second phase now. It will be easier this time since we already know how phase one works.
 
 ```rust
     //...
@@ -1277,18 +1274,18 @@ Let's analyze the second phase now, it will be easier this time since we already
     //...
 ```
 
-To reiterate the lhs in this case is the `msb_packed_result` from the previous phase.
+To reiterate, the lhs in this case is the `msb_packed_result` from the previous phase.
 
-As you can see they are very, very similar (that's why I decided to use the const generic), there are a few changes:
-* We don't need to add a value to the lhs document id and group (since we already did this in the previous phase)
-* The way we compute the values intersection is different. Instead of shifting left, we do a rotate left (shifting where the bits wrap up to the other side), intersect it with the rhs values and clean up with the `lsb_mask`.
+As you can see, they are very, very similar (that's why I decided to use the const generic). There are a few changes:
+* We don't need to add a value to the lhs document ID and group (since we already did this in the previous phase).
+* The way we compute the values intersection is different. Instead of shifting left, we do a rotate left (shifting where the bits wrap up to the other side), intersect it with the rhs values, and clean up with the `lsb_mask`.
 * We don't need to write to `msb_packed_result`.
 
 And this is the entirety of the intersection process, first and second phase.
 
-**Note:** Having this approach of computing the mask and having an arbitrary value for the lhs token length solves the other problem discussed in the original article. Slop problem (yes it's called slop).
+**Note:** Having this approach of computing the mask and having an arbitrary value for the lhs token length solves the other problem discussed in the original article. Slop problem (yes, it's called slop).
 
-**Note:** You might have noticed a lot of unsafe `get_unchecked` operations, in this case the compiler would probably be able to remove the bounds check, but I want to be sure, that's why I'm doing it.
+**Note:** You might have noticed a lot of unsafe `get_unchecked` operations. In this case, the compiler would probably be able to remove the bounds check, but I want to be sure, that's why I'm doing it.
 
 {% details **Code** for the naive intersection merged into a single function **(you can ignore if you want)** %}
 ```rust
@@ -1365,25 +1362,25 @@ fn inner_intersect<const FIRST: bool>(
 {% enddetails %}
 <br/>
 
-And let the unholy simd begin...
+And let the unholy SIMD begin...
 
-## All hail the king (or queen IDK) VP2INTERSSECT
-It's a me thing or everyone has a favorite simd instruction ? Let me introduce you to my favorite AVX-512 instruction.
+## All hail the king (or queen IDK) VP2INTERSECT
+Is it just me, or does everyone have a favorite SIMD instruction? Let me introduce you to my favorite AVX-512 instruction.
 
-By the name you might guess what it does, right ? And if I had to guess you probably didn't knew that this instruction existed.
+By the name, you might guess what it does, right? And if I had to guess, you probably didn't know that this instruction existed.
 
-Why ? You might ask, because sadly this is a deprecated instruction by Intel. If you are a chip engineer at AMD or Intel please don't deprecate this instruction, it has it's use cases, trust me. Imagine when you guys release a new CPU and someone creates a benchmark that uses this instruction, wouldn't your CPU look beatiful when compared to the competition ?
+Why? You might ask, because sadly this is a deprecated instruction by Intel. If you are a chip engineer at AMD or Intel, please don't deprecate this instruction, it has its use cases, trust me. Imagine when you guys release a new CPU and someone creates a benchmark that uses this instruction, wouldn't your CPU look beautiful when compared to the competition?
 
-I'm serious don't deprecate this instruction...
+I'm serious, don't deprecate this instruction...
 
-Ok, so how does this instruction works ? In our case we are intrested in the 64 bit - 8 wide version, so here is the assembly for it:
+Ok, so how does this instruction work? In our case, we are interested in the 64-bit, 8-wide version, so here is the assembly for it:
 ```asm
 vp2intersectq k, zmm, zmm
 ```
 
-The fun thing about this little fella is that differently from other instruction it generates two mask, so it will clobber on additional register that is not specified in the operands, in this case is `k3` (`kn+1`).
+The fun thing about this little fella is that, unlike other instructions, it generates two masks, so it will clobber an additional register that is not specified in the operands, in this case, (`kn+1`).
 
-**Note:** `k` registers are mask register.
+**Note:** `k` registers are mask registers.
 
 So let's do an example to fully grasp the power of this instruction:
 ```
@@ -1394,42 +1391,42 @@ k2 (zmm0): 1 | 1 | 1 | 0 | 1 | 0 | 1 | 0
 k3 (zmm1): 1 | 0 | 1 | 1 | 0 | 0 | 0 | 0
 ```
 
-What is being computed is the intersection of the register `zmm0` and `zmm1`, but we check every number against every other number. So if the output mask has `1` in the position it means that the value was present somewhere in the other register.
+What is being computed is the intersection of the register `zmm0` and `zmm1`, but we check every number against every other number. So if the output mask has `1` in the position, it means that the value was present somewhere in the other register.
 
 **Note:** Just to be 100% clear, the `k2` mask refers to the `zmm0` register and `k3` to `zmm1`.
 
-Basically a for loop inside a for loop. Here is the Intel intrinsic guide:
+Basically, a for loop inside a for loop. Here is the Intel intrinsic guide:
 
 ![](/assets/2025-01-13-using-the-most-unhinged-avx-512-instruction-to-make-the-fastest-phrase-search-algo/vp2intersect.png)
 
-There are several wierd things about this instruction and that's why a lot of people hate it, but that's what makes it charming. But one of it's weird quirks is that it generates two masks, but in 99.9% of the cases when computing the intersection you only want/need one. But in our use case having one mask for each register is essential.
+There are several weird things about this instruction, and that's why a lot of people hate it, but that's what makes it charming. One of its weird quirks is that it generates two masks, but in 99.9% of the cases when computing the intersection, you only want/need one. But in our use case, having one mask for each register is essential.
 
-**Wanna know something funny ?**
+**Wanna know something funny?**
 
-As far as I know this instruction is only present in two CPU generations:
+As far as I know, this instruction is only present in two CPU generations:
 * Tiger Lake (11th gen Mobile CPUs)
 * ~~Zen 5~~ (Spoiler)
 
-And coincidendatly my notebook has a 11th gen CPU, lucky... When I started this project I didn't know about this instruction, so it's pure luck.
+And coincidentally, my notebook has an 11th gen CPU, lucky... When I started this project, I didn't know about this instruction, so it's pure luck.
 
-**Wanna hear another funny thing ?**
+**Wanna hear another funny thing?**
 
-This instruction suck on 11th gen... I mean truly meaning in every sense of the word.
+This instruction sucks on 11th gen... I mean truly, in every sense of the word.
 
 ![](/assets/2025-01-13-using-the-most-unhinged-avx-512-instruction-to-make-the-fastest-phrase-search-algo/uops-info.png)
 
 Table is taken from [uops.info](https://uops.info).
 
-Our nmeunomioc is the first one in the list, let's go through the stats.
+Our mnemonic is the first one in the list, let's go through the stats.
 * Latency: 30 cycles
 * Throughput: 15 cycles
 * Uops: 30
 
-If you don't know that much about cpus, trust me this is bad... It's so bad that this gigachad (Guille Díez-Canãs) mande an [emulated version](https://arxiv.org/pdf/2112.06342) that is faster...
+If you don't know that much about CPUs, trust me, this is bad... It's so bad that this gigachad (Guille Díez-Canãs) made an [emulated version](https://arxiv.org/pdf/2112.06342) that is faster...
 
-So now do you trust me that is bad ?
+So now do you trust me that it's bad?
 
-This emulated version isn't a strict emulation, because as I said earlier in 99.9% of use cases you only need one mask. So when emulated for generating a single mask this instruction can be made faster, by using another instructions!!!!
+This emulated version isn't a strict emulation, because as I said earlier, in 99.9% of use cases, you only need one mask. So when emulated for generating a single mask, this instruction can be made faster by using other instructions!!!!
 
 Here is the [compiler explorer link](https://godbolt.org/#z:OYLghAFBqd5QCxAYwPYBMCmBRdBLAF1QCcAaPECAMzwBtMA7AQwFtMQByARg9KtQYEAysib0QXACx8BBAKoBnTAAUAHpwAMvAFYTStJg1DEArgoKkl9ZATwDKjdAGFUtEywYhJANlKOAMngMmABy7gBGmMQgAEwapAAOqAqEdgwubh5evkkptgKBwWEskdFxlpjW%2BQxCBEzEBBnunj4VVWm19QSFoRFRsfHmXU1ZrUMNPcWlAwCUlqgmxMjsHACkMQDMYGCrAKwAQlSYTASLmBDm6PXICAD6qgAc3rdMAG6qu1wxM3sAIqsaACCAMBZkwAGpLiAQNckCBHs9vJJoasAOz7EHgrHg24sFifGIvWh4YAMYi3TAJPAbGKkHF4gm3ZAsBKYACOFKpSNxTAUAGs6Zjsbj8V9bgoECYqFR6JzqbScQBZRW3ZTYABKKv2gN%2BTjpt1xBLwILR/w2GKBJs2e32DFQPKM9D%2BIISJnC4JMDAUTCO4KoDEhQWAspYvL5t1eCRiQQIUSUNjZECYIBxhq%2BeDp4RTBtF0Zm4IAtKsNtgPQ9wWiLYDseD6ARwUwuBWNr96bmiSSyXKaUm6Uw6ZIfuahVi6w2Ys3WyLGWJO%2BTKfLew26Q8h1Wa2OmBtJ22Z8TSfOqT3%2B8vwV81yagRvMPXwk3i1OGWKJVKZZhuzEIOF9crVRqtTqTgXpaV7YmOLAaBoO7TmKzKshyC7cqG/JLuEwHVmBN7ghB94trusEsuycpIWGqFcOh171iwXBQQ%2B%2BGEnBRGIZIPIoY2mYUZhVFcLhj7toxCFcixyF8kmXCZuRxbrlx2FxNBT4MYRgl4CRbEKmhUkjrWWEsDEvH0UySnEcJpFMOpknDqBo46RstF4TBinwcZrGiVuHGaVZ2lURs%2BkOYZTnMS5SYbBJ6FaeBYZ2a2EEaFpNZok42EaFwcXYgl4IQNRtGool1HkQAdMQqB1LGtz0FQBAQN8qVYulmVyelukFUVJXvuVlWDjVFY5RlLC2d1uU%2BTMhXFScbWYBVEDeGFnkibFlqov8IHAtaBx2g6waYM6QKuu6nrer6/qQgQxB4DYEZRjGcaYAmSbZmm0aZvduZ4PmRYlhlJgPHSX35pW4VYY28ntrOB4fkuJ6dZZGHWfWZnA3uc7gyeJ6rh5MNeQ2250X5oNdgux59nS57owDt6%2BQp4qStKsoE5%2B35Kiqaqarc2q6jNGPgZBCMEQFQlBSeGnQ5RSUU/xRmBSJZGcbD2E0TzjlMfzUvseCQvSbLeUK/5SsqSZbHiWrFka5julRQZAnOSr6ky6bena5bkumeZtvgf1OOU47yumSFauuzZYuMl7esC77d4cyLc07jFXWNclsc9Zl8uNTxw0tWNZUTZV1WefFidmwNsnNaNpXtRAnW52l%2Bfuz1fXF61meTdNpOeVz0fcyn2W5Q1te2ejkf6Thhda419uNT5/cySJg9dxlEAaB8uwVjE3hy39GxOMWiXkYXUDUc22DFqWO/rKvC%2B7LsEfYplkV0tPPwLb8HBzLQnC7LwngcFopCoJw6pmPWBQCwlgQnWD5XgBBNDPzmHyEAux4ivw4JID%2BUCf6cF4AoEA8RIFf2fqQOAsAkBoBZHQKI5BKDEKpPQaIDASQIAILQAAnnwOgsZiCYK/Kg8IQR6iMM4DwUg3DmDEEYQAeXCNoG6OCBHELYIIURDAmGoKwOEEwwAnBiFoJg7gvAsChkdCsb%2B%2BBiBSLwK8TA2jv6YFUDdEwsZ%2BG8Cuog7%2BxJwjEF4S4LAqCTp4BYA40g5jiDhGSJgX4mB9HBiDFAuYMomDAAUAANTwJgAA7qI1kn8BH8EECIMQ7ApAyEEIoFQ6hcGkF0OJAwRgQCmHMPoPA4RMGQDmKgBI1RtEFkSq0ggBZ6DmNoA%2BbcnTwR1GIMAG8BZkCugfLYcZxADB8kwLwVAgTTpYCaRAOYVhTH2AgI4EYngNgAE4/AMHQJMPo0QuCokSMkVIAgDkgGObcvIaQLklH6NctoOyaijMaK4ZoTyTnbJsB0P57zphfPGP8zIhzgXgqCL0D5VzURbOAcsCQL834oLKb/Dg4JakEGQOCWhwB6FMIyrgQgJBl5DQgdEmBcCEGcGQaQT%2B388UYKwaQHBWgZhYo4DEHFHL0E8oZQEuMaQvBAA%3D%3D%3D) for both of them if you are intrested.
 
@@ -1443,17 +1440,17 @@ Here is the throughput predicted by [uiCA](https://uica.uops.info/) for each ver
 * Strict emulation
 ![](/assets/2025-01-13-using-the-most-unhinged-avx-512-instruction-to-make-the-fastest-phrase-search-algo/uica-strict.png)
 
-As you can see the author of the paper is not lying... So yeah it's bad...
+As you can see, the author of the paper is not lying... So yeah, it's bad...
 
 Even though it sucks, nothing else on this CPU can compute the intersection of two vectors faster, so it's still the fastest way to get what we want.
 
 **If you haven't laughed in the last two sections, now I will make you cry while laughing**
 
-It wasn't enough for me to get lucky and have a chip that is capable of using this (rare) instruction. Our lord and saviour AMD had to release the second CPU lineup (Zen 5) in the world that supports this instruction, while I was developing this project. 
+It wasn't enough for me to get lucky and have a chip that is capable of using this (rare) instruction. Our lord and savior AMD had to release the second CPU lineup (Zen 5) in the world that supports this instruction while I was developing this project.
 
 So luck is definitely on my side.
 
-I didn't pay much attention to it, but when I read this [article](http://www.numberworld.org/blogs/2024_8_7_zen5_avx512_teardown/) I could hold my wallet anymore and had to get a Zen 5 chip:
+I didn't pay much attention to it, but when I read this [article](http://www.numberworld.org/blogs/2024_8_7_zen5_avx512_teardown/) I couldn't hold my wallet anymore and had to get a Zen 5 chip:
 
 ```
 So just as Intel kills off VP2INTERSECT, AMD shows up with it. Needless to say, Zen5 had 
@@ -1474,20 +1471,20 @@ Yes, that's right. 1 cycle throughput. ONE cycle. I can't... I just can't...
 
 You read this right, this beauty is 15x faster on AMD... 15 f* times. WOW...
 
-So yeah I got a Zen 5 chip... Capitalism wins again.
+So yeah, I got a Zen 5 chip... Capitalism wins again.
 
-Don't let reviewers tell you that this generation is bad, that the 9700x is a bad chip and so on... If you need a AVX-512 compatible CPU go get yourself a Zen 5 chip, they are monstrous.
+Don't let reviewers tell you that this generation is bad, that the 9700x is a bad chip, and so on... If you need an AVX-512 compatible CPU, go get yourself a Zen 5 chip, they are monstrous.
 
-Just to be 100% that chip engineers understood my message, **DON'T KILL THIS INSTRUCTION !!!**
+Just to be 100% sure that chip engineers understood my message, **DON'T KILL THIS INSTRUCTION !!!**
 
-**Note:** After switching to the 9700x I didn't experience a 15x improvement and that was/is expected. The hot loop consist of another operations (as you will see), so in reality I got 2-5x depending on the query. Pretty good win IMHO.
+**Note:** After switching to the 9700x I didn't experience a 15x improvement and that was/is expected. The hot loop consists of other operations (as you will see), so in reality, I got 2-5x depending on the query. Pretty good win IMHO.
 
 ## Compress/Compress Store
-This is the last piece of the puzzle, for us to understand the simd version. Compress and Compress Store are also CPU instructions and they are versy similar. 
+This is the last piece of the puzzle for us to understand the SIMD version. Compress and Compress Store are also CPU instructions and they are very similar.
 
 The difference is that Compress will write to a register and Compress Store to memory.
 
-By the same is faily easy to tell that they are compressing something, but what exactly ? They basically recieve a register and mask and pack the values from the register if the bit is set in the mask.
+By the name, it's fairly easy to tell that they are compressing something, but what exactly? They basically receive a register and mask and pack the values from the register if the bit is set in the mask.
 
 ```
 zmm0: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7
@@ -1496,9 +1493,9 @@ k1:   1 | 1 | 0 | 0 | 1 | 0 | 0 | 1
       0 | 1 | 4 | 7 | X | X | X | X
 ```
 
-And `X` can be specified, or can be 0 if you want. Pretty dope right ?
+And `X` can be specified, or can be 0 if you want. Pretty dope, right?
 
-Here are the nmeunomiocs:
+Here are the mnemonics:
 
 ```
 vpcompressq zmm {z}, zmm
@@ -1506,14 +1503,14 @@ vpcompressq zmm {k}, zmm
 vpcompressq m64 {k}, zmm
 ```
 
-**Note:** Compress Store I super slow on Zen 4, so people usually do Compress + Store, which was way faster. I thought they fixed it on Zen 5 (the article I shared earlier also says that is better), but at least in my benchmarks doing a Compress + Store is still faster in Zen 5, not by much but a little. I haven't micro benchmarked the instruction, just changed in my use case and measured the impact, that is why you are going to see Compress + Store.
+**Note:** Compress Store is super slow on Zen 4, so people usually do Compress + Store, which was way faster. I thought they fixed it on Zen 5 (the article I shared earlier also says that it is better), but at least in my benchmarks, doing a Compress + Store is still faster in Zen 5, not by much but a little. I haven't micro-benchmarked the instruction, just changed it in my use case and measured the impact, that is why you are going to see Compress + Store.
 
-With this we are ready to understand the simd version.
+With this, we are ready to understand the SIMD version.
 
-## Simd Intersection
-Similar to the naive version I will split each phase and we will analyze them separately (there will be a diagram at the end showing how things work with a drawing).
+## SIMD Intersection
+Similar to the naive version, I will split each phase and we will analyze them separately (there will be a diagram at the end showing how things work with a drawing).
 
-**Note:** That's is the place where I spent the most time, I easly rewrote this 20 times trying to save every cycle possible.
+**Note:** This is the place where I spent the most time, I easily rewrote this 20 times trying to save every cycle possible.
 
 ### First Phase
 ```rust
@@ -1697,69 +1694,69 @@ impl Intersect for SimdIntersect {
 }
 ```
 
-It's a lot of code, but it's not hard I swear. It's very similar to the naive version. So let's begin:
+It's a lot of code, but it's not hard, I swear. It's very similar to the naive version. So let's begin:
 
-Before the main loop begin we initialize the simd version of the needed variables by splatting and also since simd work `N = 8` elements wide we need to cap the lhs and rhs Roaringish Packed vector to the closest multiple of `N`.
+Before the main loop begins, we initialize the SIMD version of the needed variables by splatting, and also since SIMD works `N = 8` elements wide, we need to cap the lhs and rhs Roaringish Packed vector to the closest multiple of `N`.
 
-Loop over this capped slice, so instead of incrementing by 1 the lhs or rhs index we increment by `N` (similar to the naive version).
+Loop over this capped slice, so instead of incrementing by 1 the lhs or rhs index, we increment by `N` (similar to the naive version).
 
-* Get the last lhs and rhs document id and group of the current simd vector. This is used in the end of the loop, to check which index we need to increment by `N` (similar to the naive version).
+* Get the last lhs and rhs document id and group of the current SIMD vector. This is used at the end of the loop to check which index we need to increment by `N` (similar to the naive version).
 
-**Note:** There is a very specific reason for this to be at the beginning of the loop and not in the end where they are used. We will get there, just wait.
+**Note:** There is a very specific reason for this to be at the beginning of the loop and not at the end where they are used. We will get there, just wait.
 
 * Load the `N` elements from lhs and rhs (similar to the naive version).
 
-**Note:** If you know your simd instrinsics you will notice that this is an aligned load. Doing aligned loads is considarably faster, that's why we want things to be 64 byte aligned, to get a speedup in here.  I know that using the unaligned version will lead to the same performance if the address happens to be aligned, but I want to be 100% sure that we are doing aligned loads, because if not something went wrong and I prefer to crash the program if this happens.
+**Note:** If you know your SIMD intrinsics, you will notice that this is an aligned load. Doing aligned loads is considerably faster, that's why we want things to be 64-byte aligned, to get a speedup here. I know that using the unaligned version will lead to the same performance if the address happens to be aligned, but I want to be 100% sure that we are doing aligned loads because if not, something went wrong, and I prefer to crash the program if this happens.
 
-* Add to the group of the lhs vector and get the document id and group from lhs and rhs, we also get the values from rhs (similar to the naive version).
+* Add to the group of the lhs vector and get the document id and group from lhs and rhs. We also get the values from rhs (similar to the naive version).
 
-* Intersect the lhs and rhs document id and group (similar to the naive version) using the beautiful Vp2intersect and get their respective masks back.
+* Intersect the lhs and rhs document id and group (similar to the naive version) using the beautiful vp2intersect and get their respective masks back.
 
-**Note:** Since all document ids and groups in lhs/rhs are different (increasing order) we know that the number of bits set in each mask is the same.
+**Note:** Since all document IDs and groups in lhs/rhs are different (in increasing order), we know that the number of bits set in each mask is the same.
 
-**Note:** If lhs_mask is 0 and consequently rhs_mask will also be 0. We could introduce a branch here and skip the whole unsafe block I'm about to describe, but doing uncodionally is faster for the first phase (probably hard for the branch predictor), but in the second phase as you will see there is a branch and in that case it helps a lot (probably because it's easier for the branch predictor to know that is ok to skip the workload).
+**Note:** If lhs_mask is 0, consequently rhs_mask will also be 0. We could introduce a branch here and skip the whole unsafe block I'm about to describe, but doing it unconditionally is faster for the first phase (probably hard for the branch predictor), but in the second phase, as you will see, there is a branch, and in that case, it helps a lot (probably because it's easier for the branch predictor to know that it is ok to skip the workload).
 
-* Use the lhs mask to compress the lhs packed (fill with 0 the rest), get the document id and group from this compressed version, also gets the values.
+* Use the lhs mask to compress the lhs packed (fill with 0 the rest), get the document ID and group from this compressed version, and also get the values.
 
-**Note:** It's faster to do a Compress followed by 2 `ands` than do one aditional `and` in the beginning to get the values from the packed version and do 2 Compress one for the document id and group and other for the values.
+**Note:** It's faster to do a Compress followed by 2 `ands` than to do one additional `and` in the beginning to get the values from the packed version and do 2 Compress, one for the document ID and group and another for the values.
 
 * Compress the rhs values using the rhs mask.
 
-**Note:** At this point we know that the values of the document id and groups that are in the intersection are one next to each other in the simd lines.
+**Note:** At this point, we know that the values of the document ID and groups that are in the intersection are next to each other in the SIMD lanes.
 
 * Calculate the intersection of the lhs and rhs values (similar to the naive version).
 
-* Store the or between `doc_id_group_compress` (this comes from lhs) and `intersection` into `packed_result` (similar to the naive version).
+* Store the OR between `doc_id_group_compress` (this comes from lhs) and `intersection` into `packed_result` (similar to the naive version).
 
-**Note:** I could find a way to eliminated this unaligned store unfortunatly. From what I measured with perf this is now one of the big bottlenecks of this loop.
+**Note:** I couldn't find a way to eliminate this unaligned store, unfortunately. From what I measured with perf, this is now one of the big bottlenecks of this loop.
 
 * Increment `i` (similar to the naive version) (length of `packed_result`) by the number of document ids and groups that were in the intersection and have their values intersection computed (this will generate a popcount).
 
-**Note:** That's why I said that allowing the values intersection to be 0 makes our life easier, if not we would need to check which values in `intersection` vector are greater than 0 and do one more Compress operation, not good... Checking this during the merge phase is faster and cleaner IMHO.
+**Note:** That's why I said that allowing the values intersection to be 0 makes our life easier. If not, we would need to check which values in the `intersection` vector are greater than 0 and do one more Compress operation, not good... Checking this during the merge phase is faster and cleaner, in my opinion.
 
-* Do a branchless increment of the rhs index, but we need to do a a branch to analyze the values from lhs that have MSB's set.
+* Do a branchless increment of the rhs index, but we need to do a branch to analyze the values from lhs that have MSBs set.
 
-**Note:** Doing a branch here is fine is very predictable, we could remove this branch a do a branchless version, but it's slower I tested.
+**Note:** Doing a branch here is fine. It's not the most predictable, but it's faster than doing it unconditionally.
 
-* And the values from lhs with the `msb_mask` and get a mask of which values have the MSB's set.
+* AND the values from lhs with the `msb_mask` and get a mask of which values have the MSBs set.
 
-* Add one to the lhs document id and group from lhs (similar to the naive version).
+* Add one to the lhs document ID and group from lhs (similar to the naive version).
 
-* Store to `msb_packed_result` the lanes that have the MSB's set using the mask, by doing a Compress + Store.
+* Store to `msb_packed_result` the lanes that have the MSBs set using the mask, by doing a Compress + Store.
 
-**Note:** That's where I measured the poor performance of Compress Store in my use case, changing here to Compress + Store made things faster.
+**Note:** That's where I measured the poor performance of Compress Store in my use case. Changing here to Compress + Store made things faster.
 
 * Increment `j` by the number of elements written to `msb_packed_result` (this will generate a popcount).
 
-After the loop ends by incrementing rhs index and we are still in bounds for the non capped slice we need to do one last analysis on the lhs values MSB's. Because if not we might skip one potential candidate for the second phase.
+After the loop ends by incrementing the rhs index and we are still in bounds for the non-capped slice, we need to do one last analysis on the lhs values MSBs. Because if not, we might skip one potential candidate for the second phase.
 
-Similar to every simd algo we need to finish it of by doing a scalar version, so we reuse the naive version by calling it.
+Similar to every SIMD algorithm, we need to finish it off by doing a scalar version, so we reuse the naive version by calling it.
 
-**Note:** This will be very fast, since at this point there is 7 or less elements in lhs or rhs.
+**Note:** This will be very fast since at this point there are 7 or fewer elements in lhs or rhs.
 
-I hope all of this made sense, it's very similar to the naive version in various points. The only exoteric things we need to do are related to Vp2intersect and Compress/Compress Store/Compress + Store.
+I hope all of this made sense. It's very similar to the naive version in various points. The only esoteric things we need to do are related to vp2intersect and Compress/Compress Store/Compress + Store.
 
-Here is a diagram of one iteration of the loop, I hope this helps (let's use the syntax `document id,group,values` to avoid having to write binary).
+Here is a diagram of one iteration of the loop. I hope this helps (let's use the syntax `document ID,group,values` to avoid having to write binary).
 
 ```
 // let's assume this values
@@ -1852,11 +1849,10 @@ lhs_i: lhs_i + N (N = 8)
 rhs_i: rhs_i
 need_to_analyze_msb: false
 ```
-
-And that's one full iteration of the loop, I know it seems like a lot, but it's not. There is a bunch of numbers on the screen but most of the operations are very simple, so I hope you can understand it.
+And that's one full iteration of the loop. I know it seems like a lot, but it's not. There are a bunch of numbers on the screen, but most of the operations are very simple, so I hope you can understand it.
 
 ### Second Phase
-Similar to the naive version analyzing the second phase will be easier, so here is the code:
+Similar to the naive version, analyzing the second phase will be easier, so here is the code:
 
 ```rust
 #[inline(always)]
@@ -1965,19 +1961,19 @@ fn inner_intersect_second_phase<const FIRST: bool>(
 }
 ```
 
-I hope you can see that the first phase and the second phase are very similar, and also the second phase from the simd version and naive version are also very similar (just like the first phase).
+I hope you can see that the first phase and the second phase are very similar, and also the second phase from the SIMD version and naive version are also very similar (just like the first phase).
 
-There is a few noticible differences:
+There are a few noticeable differences:
 
-* Just like in the naive version we don't need to add the value of `add_to_group` since it has already been done in the firs phase
-* We intersect an `if lhs_mask > 0` to make the code faster, as mentioned earlier.
-* The way the compute the values intersection is very similar to the naive version, rotate to the left, `and` with `lsb_mask` and `rhs_values`
+* Just like in the naive version, we don't need to add the value of `add_to_group` since it has already been done in the first phase.
+* We introduce an `if lhs_mask > 0` to make the code faster, as mentioned earlier.
+* The way we compute the values intersection is very similar to the naive version: rotate to the left, `and` with `lsb_mask`, and `rhs_values`.
 
-**Note:** If you look closely the `rotl_u16` function recieves u64x8, but we are only intrested in rotating the 16 LSB's (values bits), so that's why I can use something like `_mm512_rol_epi64`.
+**Note:** If you look closely, the `rotl_u16` function receives u64x8, but we are only interested in rotating the 16 LSBs (values bits), so that's why I can use something like `_mm512_rol_epi64`.
 
-* In the second phase we don't need to analyze the values that have the MSB's set, so there is no branch, instead we do a brachless increment of `lhs_i`. just like we did with `rhs_i`
+* In the second phase, we don't need to analyze the values that have the MSBs set, so there is no branch. Instead, we do a branchless increment of `lhs_i`, just like we did with `rhs_i`.
 
-And that's it, that's how you implement a intersection using AVX-512.
+And that's it, that's how you implement an intersection using AVX-512.
 
 {% details **Code** for the simd intersection merged into a single function **(you can ignore if you want)** %}
 ```rust
@@ -2113,11 +2109,11 @@ fn inner_intersect<const FIRST: bool>(
 <br/>
 
 ### Never trust the compiler
-What I'm about to tell you doesn't happen in the current version, but it happened in previous one. I swear I'm not going crazy...
+What I'm about to tell you doesn't happen in the current version, but it happened in a previous one. I swear I'm not going crazy...
 
-Do you remember earlier when I said that there is a very specific reason on why the `lhs_last` and `rhs_last` are loaded in the beginning of the loop, but only used at the end ?
+Do you remember earlier when I said that there is a very specific reason why the `lhs_last` and `rhs_last` are loaded at the beginning of the loop but only used at the end?
 
-Like any normal and sane person I wrote code like this:
+Like any normal and sane person, I wrote code like this:
 ```rust
 /// let's say we are in the first phase
 while *lhs_i < lhs.0.len() && *rhs_i < rhs.0.len() {
@@ -2147,18 +2143,18 @@ while *lhs_i < lhs.0.len() && *rhs_i < rhs.0.len() {
 }
 ```
 
-But here is the sad thing, LLVM is dumb (or too smart IDK). You would hope that the generated assembly would be the same for both cases. I'm literally only moving two lines of code up and down (they are not used anywhere previously in the loop).
+But here is the sad thing, LLVM is dumb (or too smart, IDK). You would hope that the generated assembly would be the same for both cases. I'm literally only moving two lines of code up and down (they are not used anywhere previously in the loop).
 
-The version where the `lhs_last` and `rhs_last` are loaded in the end made the code generation way worse.
+The version where the `lhs_last` and `rhs_last` are loaded at the end made the code generation way worse.
 
-Here is the compiler explorer [link](https://godbolt.org/#z:OYLghAFBqd5QCxAYwPYBMCmBRdBLAF1QCcAaPECAMzwBtMA7AQwFtMQByARg9KtQYEAysib0QXACx8BBAKoBnTAAUAHpwAMvAFYgATKVpMGoYgFcFBUgAdjmAHKt22BulJL6yAngGVG6AGFUWjMWBn1SfwAZPAYHUIAjTGIJADYAdhtUBUIfBiCQsIjrbNyBGLj7ROS0zI9MLzyhAiZiAgLQ8IN6xoFm1oIK%2BJYklK4M9xa2jqLuqcHY4dHagEp3VDNiZHYOAFI9AGYwMF2AVgAhKkwmAk3MCBK2pgT6AH0clnQVs4ARXY0AIL7I4nC5XG53CCWdCtZAIV6qAAcqVeTAAbqpTlw9N9Tn9AcDjmdLtdbsR7mJaKhRERiKjrHhcfigYCLJgANTQkAgXbpc7/AHsoXstgsbkAWSYAE8knIGLFCKQBcLOXhPtzeedkCxrNyhGr0MoBngxAB5Yhudn6z68n5KwEq2FIEBIlGpSTc16vFhYvR4AW23YHfkE1lKTkEdAavmU6nR86x5CkdlYRPJgG0Kk0ki25PWAgpED2ARVTOB4MCtkRqMgFitADWNRAygQxiILB%2BNyYQZDAKrXJATu5rte7vjyuF3p92NeVKY6FemAZ7uTU993qYCnrrzQOvJCgPtMwZkXy%2Bk7Kns9Q8/eeGxiPtgsnLBYG63AC8d6g95gD6e76kq4vu8R4nkuAGPuWvb9pG3JDi6yKjh6IBrjOdYfl%2BP5/uB7o9pW4YDvBI5jihL7rpYJDHv%2BuEVmGHIDh8NYMKEeoGnIsQEHhoZAocxJYMQeBovcPyYFQTBmLQBBMgK1hmAkEbmF47IZngwBxOgGZZjcOYHAEaAMJY7L2CA7IWHg76YEG2BcX2BlMFc7JqtYtBBnpAiGcZpk5BZVnKZm1LacQ7L8EFKlqZgGn%2BdmxCufYvmahOQpUAw7KJjc9z7KkHhUMmRhShsBAmYRUXclE0oFSs7IALS%2BQASr%2BEmcbpA75oWxYMKWLm6cSZiIr8VnJsVWbcpp1LYMQxA6dg7IJQ6KrCmYdkObNT7zfN9AEOy1gzQcPypVFEB5QVAB0YiqQwrxEBA9grMdi0AO7EEw1gQCs3y0ata3ChtnI7XtLUFtyCi0Hg2yvFQk2vk992vLYbQKN6ZgEA8uXlUjx3efcb02V983AsSyBUMAEBYAkZjAKiB7JN47nSXNuNCuSZIpe1nXcnE91QrdqDbiQUKwYOJUgKNyDjZNxDvb2iUM/jFyE8TDCoMjpPk5TShtHkCjY3i0u40zmwpaa9bXSWEm0OzmAw4tcINI26Bc5LuvCoG9MzekzLS4tCj2RyyUptcUXpRAmXZXmgPVtyrXcqzZuub1A3skdSNFQLialWjUlu72uOpgdrWnQjrWvaj%2BXo2damXag123Q9T0vdjH0qi7QLuwGgKyfJBBStYHJhep7p/X550RSLgWuTR1kfW3PEHHxySCfcARUnEyZBNYUp0wCHcKWYSl9xFNkBrxFz8QvEBLwImCr6g6%2Bb9vliKZt5wkJN921deAkmHgCgIEayB265MAHAmDpl8sHPQqQgFMBmhcMwuE8TJhbG2b8nYWiuSBAcbAjtuL6Q8iZMyFlB59SngSY%2BWoiYQCmMATABBwakjuIPfYeh0SYmxGiawfpBDJCUF4Jhm9ZbnFiCDOIEAxD3WlFrfqrIlq%2BxSuwzhBBuENAIAAR1ESZL004/TJgSBo70vpGTVTAb1ZMvVKorRVDBGs8FNSbhYMmYiyFNHoXrH1VuJDPo/RYEjEUm56waD0S%2BPxxDs7fRoSKHxLiuCBJcSE6WdjjjB1dk3PQeh5EcSUV4FR7J6wGCzhoXMWcuCBlSY%2BXGsQIDvmAuSYAlUQFOyFBUqpUNMC1PZAkMpX0CrgL0LkvhvitwaE6WtbpTD6yz1SZVKJwz5o3xpgZB4dxkyK1FMs7ILR/5rGltglkn0IAuKGQM%2BsXBvgElbtxARQjFiiNoOIqUkidaAj9pNAgtBXhmHGOoq0Bo47jGTHFTByYKCmXGJVGqmDvk2l0h8wCRl4p8mlrgza4p8HjEHuMHGYTNp4EHji/Ypx2TikxUKH61gNCD2ga5VyjliWJ3CdYLgFKdqT2mhAcU1VHI7JVGSt2AQtrFLOR7Uhs8LhXJEWIiRm8/bIHoK0V4aIxBmF/LeT4DwmD/wiiZa06A44rjhZgsFvltW6vPAC6aAYEWu1sBq9AM0IGQprAoZyNwIDHA0KoAAYl6j1pyW5CpnsSMVFJbmSqkQCP2i1rXbgVSEZVjE1U2q1T86FeqzWGohca6Ffz9XmrOaEoUUaIrHVEJYV6Fr/VIuCilGV1w6QxqVQoBNdt8HunTdNOBkgs7S0LbazK7I3Weu9eW6eMk5JVscgwOIdIMnEB4cjaWtAEAKBMs/CaqA34f1iMAb%2Bv91UAN0kA146YQbhR1YC6WxAl0rpfuu9%2BrQt07r/vugIh7j3DzPdgSCrtF0I2BZlbxm0CFXwvUu14f6IEAa8uZYD3FuV7oiq8fcjUTL/p8c/VQVKLiShlJgOUComoBA7VZX4b7T0TxmeB1IkGgNfs%2BiwBQCRYbwYXEhySKGINodQBh7qWHpSynlPKAjRHMEkaHmRyQA1pa6DtVRnxNHp4qh/bORgqLALS3o4xlxqmZm0AY2%2Bes2mBTmMtZ48JjFZx6ZcYPbVQNnXI105pvxOyF3hP8LOJdg8f3HQ0MdegDBXrsgAPRGXZAAKn1fmulm03OXoUIPWL3nfOMAC8F%2BwYWIsuc2kpntg8vY%2ByzonJdiXqG0OtggW2EUIDHWOm5n9xm/iNyxeyWLTGbW5ZkQVhLPmSvvIYDbG1VWauuEQ0u%2BrtLNzq1oZgFRiTsvMaS/58xegCX2GTBoLlwoJvU0XDNyALWe0LYC/ioya3nPfvCZBuICGiComYLQKUFlvQMcHmJXTlkPEqnuggOgHJQtKbxbpQrhd5t%2BaOxAvtoWWsA75ftkHyXjORcU%2BEw6oGo3Jlh5s9r3tlomYZk1ub/9B6oT0FeG8OFJAo%2BBzagusMCyvVOuge2f3QOGM3GFytrwNt45%2Bhj%2BsROyIzjnAucnEBedFs3LT4g9P5xM6h3UuLoWOdc4ZpT1r9Z0eo73b63GUEFNfR%2Bkp9A1IwMLmAJNMw20gx7RrXK%2BtcaDSq6jcdDiVcG6I/x6Bu3cWremQYFG%2BVir7eqoJ/WZ3ghXdnc%2BkjzaLWjfIBN68M3GxLe7XZDbutgeEbxt52Hq6buGlRea57zP7X/de5VfbHPLvXqR9xj9VXLiNcIxceY3aBfLEdc1OydJXDZ3KLUYb43eBTfm%2BsLn13TfXhx4T0ni34%2Ba9uwa1LZJC1O%2B47x4X6fw/E%2Bj8wtYfcy6HUmv%2BfFNvK%2B8fE/05%2BXc%2B/fwIxF0pxvQOp9D5H8n%2Bfb0P%2B0rr%2BEpT5eb8H5JpQqEbZpmp/Tt5fSXguLX7fi37YQMifKP5%2BK5TF6xoKAf63TV7K4/4x6oENp76AFH5ZqwpgFW4QFrRQF%2BIwFYT34IGpCi6gZP4tZe4YFf4fYb4/Qzpzp5CDyi5KxvIwqq7/6wEH4oEIx%2Bba4b4672rmYOb6bkEyz2rMGZ4EF36SFSFrTFqbjIzYGQEC4k4UTkhgRnhJJR4b49qIYNSSQ04AaS7S6M4QChas4K6QZHoKEqgkyv477J6qEHi8oTqKJ969AMCYHh7FwKG14b5OF2r8ip5IFbjFobCCCvCXyNry5QY%2BSNZrTNwF4G6gZGCGQ%2B55Y47nBp6yoZ5oGOEh5Fo9ZlYVZM7/YxEhZVTsgnJjZZHrThItYFGbRFFr6lHp4B6VGQ6a7U61F9blYDYjG/pNFpYtFtGL6Hzn5haNH7CxF7Rpbhaq49E7QBA%2B7dHaHpFAbf7CjTFgYxE%2B6bHsgMHiHaG7E%2B5KY9FHGYy0o5HuwcBrDmwcCnC8DhAcBaCkCoAgAuBuCFT/EfGkAQBIBoBYC4CEAkDkCUA0B%2BZOCcA8AyCCAiBiDsBSAYnyBKBqCaA6AgAHCGDGCmAWBWC2CVConnCtKxDuCYCeDzJ%2BCuAzBdCRCuBDBVAjA1DjCZAlA5DzLsnFClDzLcnVBjATA9DzL9DTDBCdARAylNDzASm8lSl1DzAilzADBqnLD8lrAKAbBbA7CEiggkgQjkgPAkAtAvCYAV78KHBEhgj0JWnQhOgIiIQsK%2BiOkgjEjghkjBpaS0j0iMhhr4T0QCwWLCiigSh8a4YCaKjSyMTxjai6ggDapGgaxmgWjJjGruwzJESIQkSaIGLDoeJWLxhpw8gxhRTJi5xZjHrBk5gFlbSAxFimxljuLQQEQCx1jECNiFhILh4dhdg2SVmDhbDOiOLjiuyX5C7UTniX4uK%2BGHiUTGF4B6qXgLk5D3gzKUEYQAF37/jZqXiGFUTgR/Llk9mRnWJTnDjFlOL6FX6rmLnjm9l3lwgPluhPlaIgTrlvkfQTkpkgDMRigZlsQcRLEBonzzxCQQAiRiSNR3xjoPy7ybT7yRTNkxS6SVqeTHEiZAUdZORdRuQGSbT4UvEQqjy0jBQkBibqQ0U6QBCkHr5JQpRpSKLgJZRMk5SJwZwpzWJCxlSlyZzgrTT1QKCNSuQAxtSdmkU9R9Q6yAoRyCzDTCxRRixTRdrLHFEcjRnc70oUoHRJwECnQnoXRXQ3R3QMCPTPQ14nFrQ/Te6p6yVAwgxgwQzfiIZMAwxwwEDN5Iwoz8WiUYzQYOUdHSEirkLEwqwUxbYay0xhpSH6zEAszyUWycxazHQ8wpFS5DRxgaVZhaUSzQVSECLywQCKzKyYBkzxVUyJUGTazMgpU0IGzshGwmwdRmyZW9b9Z2wOyOWLGuw5Gux6XjoNkBRcUhy8VhwpCqVRwdndVljQrEKfohUFSCVwTCUZwI4F6TXIAPAFg05FxrAbVlwWWVzVw2V2X1zK5vH%2Brbxdw9wMURQDw%2B6YVMU4UBATzQVHzRWnzwUXwrzshrwbxhr3wFjoWvVnrL4wXnCA2LzLxXyg03zg2PJbyoVQ1KSrqvx3qfzbo/xPoHwHrAKgIQrcVQIwLnBEYILsjDntioLdi6QYJYLQV4X4KYxEJ/VkKVVUI0J0KWn6Wp5MLelsIcJcHKJ8LhlkJBo3J3IPLMjjV%2Bw96BFzpqJMCBIGI6Ja3YiGLiXXEmKmSIh7VjUflwT3k1kJgKD2LsgzkoRTjBK66wZNaQYHIxJO0dFeKRJ%2BLRIXiO1bhxKuwJKQAF5MKq2ZKqI5J5KagFKtmajFKtylIF5NLVKtJ1IzIqip0tJtIdIF6jKpJ9KTJHJDL51BVjITI4hHJcCZ3ChzKayLLkhrKrLsiKyWBa4zKRFCj7J%2BKHJRK%2BqjXw1y0Sr3JSopQvICGfKa1EEgEkEJzAowptoz0won4QoGVp7uTIqqboqpC0qcG4p2oEpEpe30rko%2B6UrdSA7%2Bgn2bQMpMrEYU3sotFhkdE8q8h8oMrDoXKy0MDCLBoK1j1lG1pDH4Hxo9pAFnqEappWRL2ZpQOmrxR5rdrMYyYOq2ZGDIwDreo%2Bpf27KXK/3XIj2K0CgRp%2B57ogNB72zgPL3QMGpGIZrJqz2r25otyRYHYlo6G4MCiVrSrlEUONrUMdpL0do6WfQ5Z9pYNDqCojrtxjp%2ByxBTpga95zqmGKZXrsi423qbpfxE3MaAIcBHow2SauyxbXprobr3o6O7o2r6OGOYXGO7JqO/rsayaAaYwzJQ4uPUbuN64FrMaWFSVsYyaQboaYbnDYb8b4YmrEZ02YXkbSyUbePQa0YqgaZq4IasaFTBOcbcZ7G8Y4Z4aCbRMiaxMWVvUSbnquzSaoZuPJO%2BPP5%2BaGauxpNaYgpqbfqWZ%2BJNMAim2mabSyGdNbjWYGjoMupyEt5lVNa1YeYPFFY%2Bag6VSpbpYAqRY/QxYzOp5daHaLMhbhYrOZbP7iOp7jVd5ebdYC11EDbVbTNayLE31F5U52xY75Zd5bPjH9WVbXPDaxbtGRYJVTa7aO5w6LaH0nbsjrbjYNUAuJJi7oDbOgurbgtd2F6XaYDXaoC3ZiAPb2kaYvZiBKCTNChfY/YrEs67GHPAtg6732pnHQ4PPpNwsLOiM4ENN3F9HY76V8hAO26Z5VGjF2zHTvOTEDXM4zFrHNGtFvR3Pu4kpdH5FsvHP9HcsVENqOGwuCsXMTH1FqtkvitzGSu/P1PR7XEh6T5Rqt57QnNsUMx5GPP85/kLkP78vi6Fx063Qy58u/rpGK6b0Xi6FOVyt2s%2B7znXjC4mHqsS6nUM6y4s7etK5DUeGmv0vmth3dlGse4Ixb5v4W6DyDHl7xoh4YFDW2v8Ol7kP5sO6FtYHIvGux5eGz4p7W58MVuqpV5hH57LE854G/hlv/z8MV43Fq5FvsEBubQN7IH0st7gHLEd4csFYR1BGqKq5ZveFz5YGT4rsNsYHSvptChWsyudGbSbu75HkHgQPH45rTtmEX7PnQGvlOvN4TuD7x7b5bvVtsEHvGt/4qGnuH5wMr2XtkEzt6Gvh3u/snn0HxHq7P4sHvtYEJtNbKFoGrnnvEHMNXsaHPigdUH3t0GDtMHdvoFwftuEs2vhKS3BG8ET3vKIGEerliHKYhHuFfR9oDOOZbjMfZFKF0e/vqGYfChaGlr%2BvzSX7nkbnuiqP8cWGZM2FIx2HusOFOHeuuG1146eEvvZvWCrn%2BEUfzKhF56qfzQ1tfTRFrGzOPsJFoCLS0KpEBZs4EUHuD24yivnFmep5XHbEKt7GbPyuWDPHQZDW0sXHufpaDs7FUpxG%2BeZz2dUWRYPUQlfE/GkB/EAlAl0nboMCkBglaBvSkAGaSCIjeapAQKpIHAaAACcXA5X6QqQK4XxkgvxRJgJnAvAy6Qy2XEJcAsA0JsBP2ZAFAEAN%2BfXoFqkCAryUofAdAatlAui4JpACQsQrQUoaJvAC3zAxAUopoCQ2gyiK3pAu4bAggpov9y3c3cVAQlIy63AvAWAdYJg4gZ3eA5IjQQkV3AJmAqgDQSMOw6JGSXxAJIMCQT0G3QQWATXBYaoe3QkxACQ2QmAIkd3wAwioA4JawVARgwACgAAangJbKaD3H8eifwJiaIOILicT/iSoOoHN7oAYEYCYCAOYJYIYHgAkMupAGsPXe5JwFVHynMlVPQEJF1D8AcNVHyvzQQFVMgLJFbt4NQsQEYI2LwKgNDwJFgOz1AMwGwCABFGUJl3bpwHoBoHoDwLl9SQ4KiSCYycyXkKyYEAqUUDXdEIsDyfqVkEKXkCKTXYKXr3qXydb8oiqQMF7wH8EXKQsJUJKRIJMMHw7%2BEDXe3W0H72MIacadsPoJ8ZwElyl8r8Ca4Fl0SWsFCSgL1/QP15QEN2XyN8AGN/dpN5JNwjN012t0t3ty3xt1tzt14Htwd4wAQMd/dk1%2Bd5d3t7d%2BSQ9wCfgM994K901x9194ont39014D8D1KKDzsACRD2KNd6QND7D0oAj%2BP1uoX3wBj9j7j/dPjyprvxT1iWT9IBT4oFT017oKSfTxScz4Dxr5z/mJrDz3z3zAC9MAQvK3KL157sgJeUvGXrtDl7JBFemAZXqr2Hy/h4AVVVErr3mR79A8hvY3qbzWDm9HA2vdLgyWVK%2BAIA/gEUgcFOCcl0AyfEAOkG95ilPecfEkjQJ97ikXeUfRgaH1lJalWB1A3gUHyT5cD1SDAhPvwMKDhBBBifCPksBqCMDU%2BmwdPgcEz7fFGuc3NLvSUy4dci%2BSAfAFQBygDc7%2BpPHEo/1kDP9CSc3H9BEB/QGCqAz1dgEMh/QfcCwTALnn8V4CmNSSsWewY4JABDJYsrgp6B4Ja5qDs%2BTXIEhwB%2BB4BDB7IHHpbGSDNZKSyAVuqN3G5i92Q/PQXkyStzVZjo3eOLEzwICpD5QNfDIRAOyEgDchu0fIbwF0FrADMWIY6OVwODpA2hNXcrhoERDG82hhgTgA12S6RCWu7gCIA0P6EcA9AGg1LiMPGHQ8cgvgSQEAA%3D%3D%3D) of an older version of the intersect function (you don't need to understand what is going on, just that in the first version they are loaded in the end and in the second they are loaded at the beginning).
+Here is the compiler explorer [link](https://godbolt.org/#z:OYLghAFBqd5QCxAYwPYBMCmBRdBLAF1QCcAaPECAMzwBtMA7AQwFtMQByARg9KtQYEAysib0QXACx8BBAKoBnTAAUAHpwAMvAFYgATKVpMGoYgFcFBUgAdjmAHKt22BulJL6yAngGVG6AGFUWjMWBn1SfwAZPAYHUIAjTGIJADYAdhtUBUIfBiCQsIjrbNyBGLj7ROS0zI9MLzyhAiZiAgLQ8IN6xoFm1oIK%2BJYklK4M9xa2jqLuqcHY4dHagEp3VDNiZHYOAFI9AGYwMF2AVgAhKkwmAk3MCBK2pgT6AH0clnQVs4ARXY0AIL7I4nC5XG53CCWdCtZAIV6qAAcqVeTAAbqpTlw9N9Tn9AcDjmdLtdbsR7mJaKhRERiKjrHhcfigYCLJgANTQkAgXbpc7/AHsoXstgsbkAWSYAE8knIGLFCKQBcLOXhPtzeedkCxrNyhGr0MoBngxAB5Yhudn6z68n5KwEq2FIEBIlGpSTc16vFhYvR4AW23YHfkE1lKTkEdAavmU6nR86x5CkdlYRPJgG0Kk0ki25PWAgpED2ARVTOB4MCtkRqMgFitADWNRAygQxiILB%2BNyYQZDAKrXJATu5rte7vjyuF3p92NeVKY6FemAZ7uTU993qYCnrrzQOvJCgPtMwZkXy%2Bk7Kns9Q8/eeGxiPtgsnLBYG63AC8d6g95gD6e76kq4vu8R4nkuAGPuWvb9pG3JDi6yKjh6IBrjOdYfl%2BP5/uB7o9pW4YDvBI5jihL7rpYJDHv%2BuEVmGHIDh8NYMKEeoGnIsQEHhoZAocxJYMQeBovcPyYFQTBmLQBBMgK1hmAkEbmF47IZngwBxOgGZZjcOYHAEaAMJY7L2CA7IWHg76YEG2BcX2BlMFc7JqtYtBBnpAiGcZpk5BZVnKZm1LacQ7L8EFKlqZgGn%2BdmxCufYvmahOQpUAw7KJjc9z7KkHhUMmRhShsBAmYRUXclE0oFSs7IALS%2BQASr%2BEmcbpA75oWxYMKWLm6cSZiIr8VnJsVWbcpp1LYMQxA6dg7IJQ6KrCmYdkObNT7zfN9AEOy1gzQcPypVFEB5QVAB0YiqQwrxEBA9grMdi0AO7EEw1gQCs3y0ata3ChtnI7XtLUFtyCi0Hg2yvFQk2vk992vLYbQKN6ZgEA8uXlUjx3efcb02V983AsSyBUMAEBYAkZjAKiB7JN47nSXNuNCuSZIpe1nXcnE91QrdqDbiQUKwYOJUgKNyDjZNxDvb2iUM/jFyE8TDCoMjpPk5TShtHkCjY3i0u40zmwpaa9bXSWEm0OzmAw4tcINI26Bc5LuvCoG9MzekzLS4tCj2RyyUptcUXpRAmXZXmgPVtyrXcqzZuub1A3skdSNFQLialWjUlu72uOpgdrWnQjrWvaj%2BXo2damXag123Q9T0vdjH0qi7QLuwGgKyfJBBStYHJhep7p/X550RSLgWuTR1kfW3PEHHxySCfcARUnEyZBNYUp0wCHcKWYSl9xFNkBrxFz8QvEBLwImCr6g6%2Bb9vliKZt5wkJN921deAkmHgCgIEayB265MAHAmDpl8sHPQqQgFMBmhcMwuE8TJhbG2b8nYWiuSBAcbAjtuL6Q8iZMyFlB59SngSY%2BWoiYQCmMATABBwakjuIPfYeh0SYmxGiawfpBDJCUF4Jhm9ZbnFiCDOIEAxD3WlFrfqrIlq%2BxSuwzhBBuENAIAAR1ESZL004/TJgSBo70vpGTVTAb1ZMvVKorRVDBGs8FNSbhYMmYiyFNHoXrH1VuJDPo/RYEjEUm56waD0S%2BPxxDs7fRoSKHxLiuCBJcSE6WdjjjB1dk3PQeh5EcSUV4FR7J6wGCzhoXMWcuCBlSY%2BXGsQIDvmAuSYAlUQFOyFBUqpUNMC1PZAkMpX0CrgL0LkvhvitwaE6WtbpTD6yz1SZVKJwz5o3xpgZB4dxkyK1FMs7ILR/5rGltglkn0IAuKGQM%2BsXBvgElbtxARQjFiiNoOIqUkidaAj9pNAgtBXhmHGOoq0Bo47jGTHFTByYKCmXGJVGqmDvk2l0h8wCRl4p8mlrgza4p8HjEHuMHGYTNp4EHji/Ypx2TikxUKH61gNCD2ga5VyjliWJ3CdYLgFKdqT2mhAcU1VHI7JVGSt2AQtrFLOR7Uhs8LhXJEWIiRm8/bIHoK0V4aIxBmF/LeT4DwmD/wiiZa06A44rjhZgsFvltW6vPAC6aAYEWu1sBq9AM0IGQprAoZyNwIDHA0KoAAYl6j1pyW5CpnsSMVFJbmSqkQCP2i1rXbgVSEZVjE1U2q1T86FeqzWGohca6Ffz9XmrOaEoUUaIrHVEJYV6Fr/VIuCilGV1w6QxqVQoBNdt8HunTdNOBkgs7S0LbazK7I3Weu9eW6eMk5JVscgwOIdIMnEB4cjaWtAEAKBMs/CaqA34f1iMAb%2Bv91UAN0kA146YQbhR1YC6WxAl0rpfuu9%2BrQt07r/vugIh7j3DzPdgSCrtF0I2BZlbxm0CFXwvUu14f6IEAa8uZYD3FuV7oiq8fcjUTL/p8c/VQVKLiShlJgOUComoBA7VZX4b7T0TxmeB1IkGgNfs%2BiwBQCRYbwYXEhySKGINodQBh7qWHpSynlPKAjRHMEkaHmRyQA1pa6DtVRnxNHp4qh/bORgqLALS3o4xlxqmZm0AY2%2Bes2mBTmMtZ48JjFZx6ZcYPbVQNnXI105pvxOyF3hP8LOJdg8f3HQ0MdegDBXrsgAPRGXZAAKn1fmulm03OXoUIPWL3nfOMAC8F%2BwYWIsuc2kpntg8vY%2ByzonJdiXqG0OtggW2EUIDHWOm5n9xm/iNyxeyWLTGbW5ZkQVhLPmSvvIYDbG1VWauuEQ0u%2BrtLNzq1oZgFRiTsvMaS/58xegCX2GTBoLlwoJvU0XDNyALWe0LYC/ioya3nPfvCZBuICGiComYLQKUFlvQMcHmJXTlkPEqnuggOgHJQtKbxbpQrhd5t%2BaOxAvtoWWsA75ftkHyXjORcU%2BEw6oGo3Jlh5s9r3tlomYZk1ub/9B6oT0FeG8OFJAo%2BBzagusMCyvVOuge2f3QOGM3GFytrwNt45%2Bhj%2BsROyIzjnAucnEBedFs3LT4g9P5xM6h3UuLoWOdc4ZpT1r9Z0eo73b63GUEFNfR%2Bkp9A1IwMLmAJNMw20gx7RrXK%2BtcaDSq6jcdDiVcG6I/x6Bu3cWremQYFG%2BVir7eqoJ/WZ3ghXdnc%2BkjzaLWjfIBN68M3GxLe7XZDbutgeEbxt52Hq6buGlRea57zP7X/de5VfbHPLvXqR9xj9VXLiNcIxceY3aBfLEdc1OydJXDZ3KLUYb43eBTfm%2BsLn13TfXhx4T0ni34%2Ba9uwa1LZJC1O%2B47x4X6fw/E%2Bj8wtYfcy6HUmv%2BfFNvK%2B8fE/05%2BXc%2B/fwIxF0pxvQOp9D5H8n%2Bfb0P%2B0rr%2BEpT5eb8H5JpQqEbZpmp/Tt5fSXguLX7fi37YQMifKP5%2BK5TF6xoKAf63TV7K4/4x6oENp76AFH5ZqwpgFW4QFrRQF%2BIwFYT34IGpCi6gZP4tZe4YFf4fYb4/Qzpzp5CDyi5KxvIwqq7/6wEH4oEIx%2Bba4b4672rmYOb6bkEyz2rMGZ4EF36SFSFrTFqbjIzYGQEC4k4UTkhgRnhJJR4b49qIYNSSQ04AaS7S6M4QChas4K6QZHoKEqgkyv477J6qEHi8oTqKJ969AMCYHh7FwKG14b5OF2r8ip5IFbjFobCCCvCXyNry5QY%2BSNZrTNwF4G6gZGCGQ%2B55Y47nBp6yoZ5oGOEh5Fo9ZlYVZM7/YxEhZVTsgnJjZZHrThItYFGbRFFr6lHp4B6VGQ6a7U61F9blYDYjG/pNFpYtFtGL6Hzn5haNH7CxF7Rpbhaq49E7QBA%2B7dHaHpFAbf7CjTFgYxE%2B6bHsgMHiHaG7E%2B5KY9FHGYy0o5HuwcBrDmwcCnC8DhAcBaCkCoAgAuBuCFT/EfGkAQBIBoBYC4CEAkDkCUA0B%2BZOCcA8AyCCAiBiDsBSAYnyBKBqCaA6AgAHCGDGCmAWBWC2CVConnCtKxDuCYCeDzJ%2BCuAzBdCRCuBDBVAjA1DjCZAlA5DzLsnFClDzLcnVBjATA9DzL9DTDBCdARAylNDzASm8lSl1DzAilzADBqnLD8lrAKAbBbA7CEiggkgQjkgPAkAtAvCYAV78KHBEhgj0JWnQhOgIiIQsK%2BiOkgjEjghkjBpaS0j0iMhhr4T0QCwWLCiigSh8a4YCaKjSyMTxjai6ggDapGgaxmgWjJjGruwzJESIQkSaIGLDoeJWLxhpw8gxhRTJi5xZjHrBk5gFlbSAxFimxljuLQQEQCx1jECNiFhILh4dhdg2SVmDhbDOiOLjiuyX5C7UTniX4uK%2BGHiUTGF4B6qXgLk5D3gzKUEYQAF37/jZqXiGFUTgR/Llk9mRnWJTnDjFlOL6FX6rmLnjm9l3lwgPluhPlaIgTrlvkfQTkpkgDMRigZlsQcRLEBonzzxCQQAiRiSNR3xjoPy7ybT7yRTNkxS6SVqeTHEiZAUdZORdRuQGSbT4UvEQqjy0jBQkBibqQ0U6QBCkHr5JQpRpSKLgJZRMk5SJwZwpzWJCxlSlyZzgrTT1QKCNSuQAxtSdmkU9R9Q6yAoRyCzDTCxRRixTRdrLHFEcjRnc70oUoHRJwECnQnoXRXQ3R3QMCPTPQ14nFrQ/Te6p6yVAwgxgwQzfiIZMAwxwwEDN5Iwoz8WiUYzQYOUdHSEirkLEwqwUxbYay0xhpSH6zEAszyUWycxazHQ8wpFS5DRxgaVZhaUSzQVSECLywQCKzKyYBkzxVUyJUGTazMgpU0IGzshGwmwdRmyZW9b9Z2wOyOWLGuw5Gux6XjoNkBRcUhy8VhwpCqVRwdndVljQrEKfohUFSCVwTCUZwI4F6TXIAPAFg05FxrAbVlwWWVzVw2V2X1zK5vH%2Brbxdw9wMURQDw%2B6YVMU4UBATzQVHzRWnzwUXwrzshrwbxhr3wFjoWvVnrL4wXnCA2LzLxXyg03zg2PJbyoVQ1KSrqvx3qfzbo/xPoHwHrAKgIQrcVQIwLnBEYILsjDntioLdi6QYJYLQV4X4KYxEJ/VkKVVUI0J0KWn6Wp5MLelsIcJcHKJ8LhlkJBo3J3IPLMjjV%2Bw96BFzpqJMCBIGI6Ja3YiGLiXXEmKmSIh7VjUflwT3k1kJgKD2LsgzkoRTjBK66wZNaQYHIxJO0dFeKRJ%2BLRIXiO1bhxKuwJKQAF5MKq2ZKqI5J5KagFKtmajFKtylIF5NLVKtJ1IzIqip0tJtIdIF6jKpJ9KTJHJDL51BVjITI4hHJcCZ3ChzKayLLkhrKrLsiKyWBa4zKRFCj7J%2BKHJRK%2BqjXw1y0Sr3JSopQvICGfKa1EEgEkEJzAowptoz0won4QoGVp7uTIqqboqpC0qcG4p2oEpEpe30rko%2B6UrdSA7%2Bgn2bQMpMrEYU3sotFhkdE8q8h8oMrDoXKy0MDCLBoK1j1lG1pDH4Hxo9pAFnqEappWRL2ZpQOmrxR5rdrMYyYOq2ZGDIwDreo%2Bpf27KXK/3XIj2K0CgRp%2B57ogNB72zgPL3QMGpGIZrJqz2r25otyRYHYlo6G4MCiVrSrlEUONrUMdpL0do6WfQ5Z9pYNDqCojrtxjp%2ByxBTpga95zqmGKZXrsi423qbpfxE3MaAIcBHow2SauyxbXprobr3o6O7o2r6OGOYXGO7JqO/rsayaAaYwzJQ4uPUbuN64FrMaWFSVsYyaQboaYbnDYb8b4YmrEZ02YXkbSyUbePQa0YqgaZq4IasaFTBOcbcZ7G8Y4Z4aCbRMiaxMWVvUSbnquzSaoZuPJO%2BPP5%2BaGauxpNaYgpqbfqWZ%2BJNMAim2mabSyGdNbjWYGjoMupyEt5lVNa1YeYPFFY%2Bag6VSpbpYAqRY/QxYzOp5daHaLMhbhYrOZbP7iOp7jVd5ebdYC11EDbVbTNayLE31F5U52xY75Zd5bPjH9WVbXPDaxbtGRYJVTa7aO5w6LaH0nbsjrbjYNUAuJJi7oDbOgurbgtd2F6XaYDXaoC3ZiAPb2kaYvZiBKCTNChfY/YrEs67GHPAtg6732pnHQ4PPpNwsLOiM4ENN3F9HY76V8hAO26Z5VGjF2zHTvOTEDXM4zFrHNGtFvR3Pu4kpdH5FsvHP9HcsVENqOGwuCsXMTH1FqtkvitzGSu/P1PR7XEh6T5Rqt57QnNsUMx5GPP85/kLkP78vi6Fx063Qy58u/rpGK6b0Xi6FOVyt2s%2B7znXjC4mHqsS6nUM6y4s7etK5DUeGmv0vmth3dlGse4Ixb5v4W6DyDHl7xoh4YFDW2v8Ol7kP5sO6FtYHIvGux5eGz4p7W58MVuqpV5hH57LE854G/hlv/z8MV43Fq5FvsEBubQN7IH0st7gHLEd4csFYR1BGqKq5ZveFz5YGT4rsNsYHSvptChWsyudGbSbu75HkHgQPH45rTtmEX7PnQGvlOvN4TuD7x7b5bvVtsEHvGt/4qGnuH5wMr2XtkEzt6Gvh3u/snn0HxHq7P4sHvtYEJtNbKFoGrnnvEHMNXsaHPigdUH3t0GDtMHdvoFwftuEs2vhKS3BG8ET3vKIGEerliHKYhHuFfR9oDOOZbjMfZFKF0e/vqGYfChaGlr%2BvzSX7nkbnuiqP8cWGZM2FIx2HusOFOHeuuG1146eEvvZvWCrn%2BEUfzKhF56qfzQ1tfTRFrGzOPsJFoCLS0KpEBZs4EUHuD24yivnFmep5XHbEKt7GbPyuWDPHQZDW0sXHufpaDs7FUpxG%2BeZz2dUWRYPUQlfE/GkB/EAlAl0nboMCkBglaBvSkAGaSCIjeapAQKpIHAaAACcXA5X6QqQK4XxkgvxRJgJnAvAy6Qy2XEJcAsA0JsBP2ZAFAEAN%2BfXoFqkCAryUofAdAatlAui4JpACQsQrQUoaJvAC3zAxAUopoCQ2gyiK3pAu4bAggpov9y3c3cVAQlIy63AvAWAdYJg4gZ3eA5IjQQkV3AJmAqgDQSMOw6JGSXxAJIMCQT0G3QQWATXBYaoe3QkxACQ2QmAIkd3wAwioA4JawVARgwACgAAangJbKaD3H8eifwJiaIOILicT/iSoOoHN7oAYEYCYCAOYJYIYHgAkMupAGsPXe5JwFVHynMlVPQEJF1D8AcNVHyvzQQFVMgLJFbt4NQsQEYI2LwKgNDwJFgOz1AMwGwCABFGUJl3bpwHoBoHoDwLl9SQ4KiSCYycyXkKyYEAqUUDXdEIsDyfqVkEKXkCKTXYKXr3qXydb8oiqQMF7wH8EXKQsJUJKRIJMMHw7%2BEDXe3W0H72MIacadsPoJ8ZwElyl8r8Ca4Fl0SWsFCSgL1/QP15QEN2XyN8AGN/dpN5JNwjN012t0t3ty3xt1tzt14Htwd4wAQMd/dk1%2Bd5d3t7d%2BSQ9wCfgM994K901x9194ont39014D8D1KKDzsACRD2KNd6QND7D0oAj%2BP1uoX3wBj9j7j/dPjyprvxT1iWT9IBT4oFT017oKSfTxScz4Dxr5z/mJrDz3z3zAC9MAQvK3KL157sgJeUvGXrtDl7JBFemAZXqr2Hy/h4AVVVErr3mR79A8hvY3qbzWDm9HA2vdLgyWVK%2BAIA/gEUgcFOCcl0AyfEAOkG95ilPecfEkjQJ97ikXeUfRgaH1lJalWB1A3gUHyT5cD1SDAhPvwMKDhBBBifCPksBqCMDU%2BmwdPgcEz7fFGuc3NLvSUy4dci%2BSAfAFQBygDc7%2BpPHEo/1kDP9CSc3H9BEB/QGCqAz1dgEMh/QfcCwTALnn8V4CmNSSsWewY4JABDJYsrgp6B4Ja5qDs%2BTXIEhwB%2BB4BDB7IHHpbGSDNZKSyAVuqN3G5i92Q/PQXkyStzVZjo3eOLEzwICpD5QNfDIRAOyEgDchu0fIbwF0FrADMWIY6OVwODpA2hNXcrhoERDG82hhgTgA12S6RCWu7gCIA0P6EcA9AGg1LiMPGHQ8cgvgSQEAA%3D%3D%3D) of an older version of the intersect function (you don't need to understand what is going on, just that in the first version they are loaded at the end and in the second they are loaded at the beginning).
 
-I took a print from diff of the important assembly section (left: loaded in the end | right: loaded at the beginning):
+I took a print from the diff of the important assembly section (left: loaded at the end | right: loaded at the beginning):
 ![](/assets/2025-01-13-using-the-most-unhinged-avx-512-instruction-to-make-the-fastest-phrase-search-algo/diff-load-end-begin.png)
 
 I don't have 20/20 vision, but they look different to me...
 
-So what it's the problem ? There are a few, but mainly with this instructions
+So what is the problem? There are a few, but mainly with these instructions:
 ```asm
 ;...
 vpunpckhqdq     xmm8, xmm8, xmmword ptr [rdi + 8*r11 + 48]
@@ -2171,13 +2167,13 @@ vpextrq rbx, xmm3, 1
 vmovq   r14, xmm3
 ```
 
-The compiler is trying to be smart and optimize the loads by doing some simd shenanigans. I'm no LLVM speciallist, so reading LLVM IR and LLVM optimization passes to me are like reading a foreigner language, so I can't be 100% sure on why it's trying to do this. But if I had to guess is that since the last values are already loaded by `lhs_pack` and `rhs_pack` it tries to use them instead of loading again.
+The compiler is trying to be smart and optimize the loads by doing some SIMD shenanigans. I'm no LLVM specialist, so reading LLVM IR and LLVM optimization passes to me is like reading a foreign language, so I can't be 100% sure why it's trying to do this. But if I had to guess, it's that since the last values are already loaded by `lhs_pack` and `rhs_pack`, it tries to use them instead of loading again.
 
-Unfortunatly this leads to horrible performance loss, since it's way faster to do 2 `mov`s followed by 2 `lea`s (just like in the version where they are loaded in the beginning of the loop).
+Unfortunately, this leads to horrible performance loss, since it's way faster to do 2 `mov`s followed by 2 `lea`s (just like in the version where they are loaded at the beginning of the loop).
 
-I would assume that by loading them at the beginning (before loading the vectors) it removes the possibility or make it harder for the compiler to optimize.
+I would assume that by loading them at the beginning (before loading the vectors), it removes the possibility or makes it harder for the compiler to optimize.
 
-As mentioned: The current version this doesn't suffer from this issue and since the function changed a lot from this version to the current one, only God knows what changed in the LLVM optimization pipeline to avoid this problem. So to be 100% sure that this will not happen in the future when I change the intersection code I will leave it in the beginnig of the loop.
+As mentioned: The current version doesn't suffer from this issue, and since the function changed a lot from this version to the current one, only God knows what changed in the LLVM optimization pipeline to avoid this problem. So to be 100% sure that this will not happen in the future when I change the intersection code, I will leave it at the beginning of the loop.
 
 ### Assembly analysis
 Let's take a look at the assembly generated for the hot loop in the first phase.
@@ -2238,17 +2234,17 @@ Let's take a look at the assembly generated for the hot loop in the first phase.
 	jb .LBB23_19
 ```
 
-Look all of those `zmm` register, sexy right ? Let's run this through uiCA (for Tiger Lake) and see how fast we can theoretically go.
+Look at all those `zmm` registers, sexy right? Let's run this through uiCA (for Tiger Lake) and see how fast we can theoretically go.
 
 ![](/assets/2025-01-13-using-the-most-unhinged-avx-512-instruction-to-make-the-fastest-phrase-search-algo/uica-first-phase.png)
 
-**Note:** I know uiCA and tools similar to it like llvm-mca are just a simulation of best case scenario, in the real world this number is way higher, but it's good enough for us to analyze the behaviour of code.
+**Note:** I know uiCA and tools similar to it like llvm-mca are just a simulation of the best-case scenario. In the real world, this number is way higher, but it's good enough for us to analyze the behavior of the code.
 
-`24 cycles / 8 elements` (`3 cycles / element`) it's pretty decent IMHO and that's for Tiger Lake on Zen 5 this value is probably lower.
+`24 cycles / 8 elements` (`3 cycles / element`) is pretty decent IMHO, and that's for Tiger Lake. On Zen 5, this value is probably lower.
 
-Just for fun let's do some napking math and figure it out an approximation for it on my 9700x system. The values were taken from one of the queries that have two tokens after merging.
+Just for fun, let's do some napkin math and figure out an approximation for it on my 9700x system. The values were taken from one of the queries that have two tokens after merging.
 
-**Note:** As I said in the disclaimer the time taken is pretty damn consistent between runs.
+**Note:** As I said in the disclaimer, the time taken is pretty damn consistent between runs.
 
 ```
 lhs len: 551280
@@ -2268,34 +2264,34 @@ First phase for this query takes 849.331us (Spoiler): 849.331 / 0.000018519 = 45
 
 And that's the effect of caches and branch prediction for you. The values in real life will always be higher than the theoretical best scenario. But still, pretty good.
 
-**Note:** Here is a great [article](https://travisdowns.github.io/blog/2019/06/11/speed-limits.html) for you if you wanna go at the speed limit.
+**Note:** Here is a great [article](https://travisdowns.github.io/blog/2019/06/11/speed-limits.html) for you if you want to go at the speed limit.
 
 ### Code alignment
-During the development life cycle sometimes I would make a change somewhere in the code base that wasn't the intersection code and this would impact the performance of things, specially for the second phase.
+During the development lifecycle, sometimes I would make a change somewhere in the codebase that wasn't the intersection code, and this would impact the performance of things, especially for the second phase.
 
-I would measure a degradation of up to 50%, but why ? The generated assembly is the same and I didn't even change the code. WTF ? And that's when you learn about that the memory addresses of your functions and loops matter.
+I would measure a degradation of up to 50%, but why? The generated assembly is the same, and I didn't even change the code. WTF? And that's when you learn that the memory addresses of your functions and loops matter.
 
 **Note:** Great [article](https://www.bazhenov.me/posts/2024-02-performance-roulette/#:~:text=Aligning%20code%20can%20result%20in,made%20directly%20within%20the%20code.) about this topic.
 
-So what is the problem ? The generated assembly for the loop in the second phase has 173 bytes and this fits into 3 cache lines (each one of 64 bytes). So depending where the it's place it would cross a cache line and make it use 4 instead of 3, resulting in slower execution.
+So what is the problem? The generated assembly for the loop in the second phase has 173 bytes, and this fits into 3 cache lines (each one of 64 bytes). So depending on where it's placed, it would cross a cache line and make it use 4 instead of 3, resulting in slower execution.
 
-To analyze this problem I developed a [tool](https://github.com/Gab-Menezes/asm-alignment) that shows you the alignment of code (I couldn't find one online, so...).
+To analyze this problem, I developed a [tool](https://github.com/Gab-Menezes/asm-alignment) that shows you the alignment of code (I couldn't find one online, so...).
 
 Here is the output when the code is unaligned:
 
 ![](/assets/2025-01-13-using-the-most-unhinged-avx-512-instruction-to-make-the-fastest-phrase-search-algo/unaligned-loop.png)
 
-As you can see we are using 4 cache lines. Fixing this is easy and hard at the same time.
+As you can see, we are using 4 cache lines. Fixing this is easy and hard at the same time.
 
-Easy part is that we only need to introduce some `nop`s before the code segment to align it to the beginning of cache line.
+The easy part is that we only need to introduce some `nop`s before the code segment to align it to the beginning of the cache line.
 
-The hard thing is that the number of `nop`s will change if the generated code change. So a new compiler version, targeting another cpu/using different features, changing the code will make this number go up and down... 
+The hard thing is that the number of `nop`s will change if the generated code changes. So a new compiler version, targeting another CPU/using different features, or changing the code will make this number go up and down...
 
-Also functions are 16 byte aligned by default on the ELF spec, so even if we add the correct number of `nop`s by just recompiling the code after a small change in another part of the source code (far away from the intersection function) can make f* the number of `nop`s.
+Also, functions are 16-byte aligned by default on the ELF spec, so even if we add the correct number of `nop`s, just recompiling the code after a small change in another part of the source code (far away from the intersection function) can mess up the number of `nop`s.
 
-So that's a unwinnable fight. One way to mitigate the problem with the ELF alignment of function is to align forcefully align them to 64 byte, this can be done by using the flag `-C llvm-args=-align-all-functions=6`. This will ensure that at least the number of `nop`s doesn't change if you modify the code somewhere else (of course you need to `#[inline(never)]` the function).
+So that's an unwinnable fight. One way to mitigate the problem with the ELF alignment of functions is to forcefully align them to 64 bytes. This can be done by using the flag `-C llvm-args=-align-all-functions=6`. This will ensure that at least the number of `nop`s doesn't change if you modify the code somewhere else (of course, you need to `#[inline(never)]` the function).
 
-So with that in mind I compiled all of my code with `-C llvm-args=-align-all-functions=6` and found the number of `nop`s needed in each phase.
+So with that in mind, I compiled all of my code with `-C llvm-args=-align-all-functions=6` and found the number of `nop`s needed in each phase.
 
 ```rust
 if FIRST {
@@ -2315,13 +2311,13 @@ if FIRST {
 
 ![](/assets/2025-01-13-using-the-most-unhinged-avx-512-instruction-to-make-the-fastest-phrase-search-algo/aligned-loop.png)
 
-And that's the output you wanna see, the begin of the loop on a 64 byte boundary.
+And that's the output you want to see, the beginning of the loop on a 64-byte boundary.
 
 # The last optimization ideas
 ## Binary Search
-One simple, but effective idea to reduce the number of intersections is to binary search `lhs` or `rhs` depending on which has the smallest first document id by the first document id from the other. Doing so allows us to skip the beginning section of the Roaringish Packed.
+One simple but effective idea to reduce the number of intersections is to binary search `lhs` or `rhs` depending on which has the smallest first document ID by the first document ID from the other. Doing so allows us to skip the beginning section of the Roaringish Packed.
 
-This idea is specially effective in scenarios like this:
+This idea is especially effective in scenarios like this:
 
 ```
 lhs: 1000000,g_0,v_0 | ...
@@ -2332,9 +2328,9 @@ We are going to search by 1000000,0,0
 
 Skipping all of the beginning section of rhs avoids having to compute the intersection of elements that can't be in the final result.
 
-We have to be careful though, for this to work properly we need to search for only the document id, the group and values need to be 0, so we find the first occurrence of this document id, avoiding skipping elements where the value MSB's would cross the group boundary.
+We have to be careful though, for this to work properly we need to search for only the document ID, the group, and values need to be 0, so we find the first occurrence of this document id, avoiding skipping elements where the value MSBs would cross the group boundary.
 
-Also taking care to align the beginning of the Roaringish Packed to 64 bytes.
+Also, take care to align the beginning of the Roaringish Packed to 64 bytes.
 
 {% details **Code** for the binary search **(you can ignore if you want)** %}
 ```rust
@@ -2378,9 +2374,9 @@ fn binary_search(
 <br/>
 
 ## Gallop Intersection
-And we have come full circle... In the [second article](https://softwaredoug.com/blog/2024/05/05/faster-intersect) Doug described as how using this intersection helped speedup SearchArray. So let's use it for our advantage.
+And we have come full circle... In the [second article](https://softwaredoug.com/blog/2024/05/05/faster-intersect), Doug described how using this intersection helped speed up SearchArray. So let's use it to our advantage.
 
-When computing intersections where the number of elements in lhs way smaller than in rhs (or vice-versa) we can use gallop intersection instead of simd intersection and get a significant speedup. In my testing I found that it's worth switching to gallop intersection when one of the sides is 650x bigger than the other in the first phase and 120x in the second phase.
+When computing intersections where the number of elements in `lhs` is way smaller than in `rhs` (or vice-versa), we can use gallop intersection instead of the SIMD intersection and get a significant speedup. In my testing, I found that it's worth switching to gallop intersection when one of the sides is 650x bigger than the other in the first phase and 120x in the second phase.
 
 ```rust
 const FIRST_GALLOP_INTERSECT: usize = 650;
@@ -2422,9 +2418,9 @@ let (msb_packed, _) = match proportion {
 };
 ```
 
-The way that the gallop intersection works is different from the naive and simd, since we are skipping elements we can't accumulate all of the elements that have the values MSB's set to use in a second phase. Instead we need to use the original Roaringish Packed and modify the second phase to account for this. So that's why we have `GallopIntersectFirst`, which has two phases and `GallopIntersectSecond` which has only one phase (the second one).
+The way that the gallop intersection works is different from the naive and SIMD versions. Since we are skipping elements, we can't accumulate all of the elements that have the values MSBs set to use in a second phase. Instead, we need to use the original Roaringish Packed and modify the second phase to account for this. That's why we have `GallopIntersectFirst`, which has two phases, and `GallopIntersectSecond`, which has only one phase (the second one).
 
-I will not bother you with the details, if you wanna look at how they are implemented here is the code.
+I will not bother you with the details. If you want to look at how they are implemented, here is the code.
 
 {% details **Code** for `GallopIntersectFirst` **(you can ignore if you want)** %}
 ```rust
@@ -2583,10 +2579,10 @@ impl Intersect for GallopIntersectSecond {
 {% enddetails %}
 <br/>
 
-One funny thing is that when micro benchmarking this functions I found that doing branchless version is faster, but when using in "real world" the branching version is faster. I don't know why and didn't want to investigate...
+One funny thing is that when micro-benchmarking these functions, I found that doing branchless version is faster, but when used in the "real world," the branching version is faster. I don't know why and didn't want to investigate...
 
 # Merging the phases
-Not that intresting/anything going on. If you understood the article I hope you can imagine how this would work.
+Not that interesting/anything going on. If you understood the article, I hope you can imagine how this would work.
 
 {% details **Code** for the merge **(you can ignore if you want)** %}
 ```rust
@@ -2674,7 +2670,7 @@ fn merge_results(
 <br/>
 
 # Getting the document ids
-There is something intresting here, but the article is long enough so I will just drop the naive and simd versions. They are very simple to understand, so if you want...
+There is something interesting here, but the article is long enough, so I will just drop the naive and SIMD versions. They are very simple to understand, so if you want...
 
 {% details **Code** for the naive version **(you can ignore if you want)** %}
 ```rust
@@ -2781,20 +2777,20 @@ fn get_doc_ids(&self) -> Vec<u32> {
 {% enddetails %}
 <br/>
 
-And with that we have all I wanted to talk about. I hope that things made sense.
+And with that, we have covered all I wanted to talk about. I hope that everything made sense.
 
 # About Meilisearch
-I'm not trying to dunk on Meilisearch, please don't read it like that. The reason why I chose it are because it's knwon for it's good performance, easy of use and my knowledge on how the internals work.
+I'm not trying to dunk on Meilisearch, please don't interpret it that way. The reason why I chose it is because it's known for its good performance, ease of use, and my knowledge of how the internals work.
 
-Since Meilisearch is a fully fledge search engine it wouldn't be fair to use the final time, given it's doing a lot more. Like processing my query, json encoding decoding, network (even though I'm running locally)... So to be fair we will say that the time spent on the query it self is 80% of the total time (i.e 20% of the time was spent on meilisearch internals). IMHO this this very reasonable.
+Since Meilisearch is a fully-fledged search engine, it wouldn't be fair to use the final time, given it's doing a lot more. This includes processing my query, JSON encoding/decoding, network operations (even though I'm running locally)... So to be fair, we will say that the time spent on the query itself is 80% of the total time (i.e 20% of the time was spent on Meilisearch internals). IMHO, this is very reasonable.
 
-**Note:** 80% might even be a too little, if I had to guess is something around 95-98%, but to be fair let's use a lower number.
+**Note:** 80% might even be too little. If I had to guess, it's something around 95-98%, but to be fair, let's use a lower number.
 
 I used the latest version of Meilisearch available on nixpkgs (1.11.3) at the time of writing.
 
-AFAIK the Meilisearch implementation of phrase search works by computing the distance from every token to every other tokens ([link 1](https://github.com/meilisearch/meilisearch/blob/c85146524b960cf445a08e6510f33bcd1d8b0a5e/crates/milli/src/index.rs#L128), [link 2](https://github.com/meilisearch/meilisearch/blob/c85146524b960cf445a08e6510f33bcd1d8b0a5e/crates/milli/src/search/new/resolve_query_graph.rs#L187)), which is very time consuming during indexing and takes a lot of disk space. I might completly wrong, but that's what I got looking at the code.
+AFAIK, the Meilisearch implementation of phrase search works by computing the distance from every token to every other token ([link 1](https://github.com/meilisearch/meilisearch/blob/c85146524b960cf445a08e6510f33bcd1d8b0a5e/crates/milli/src/index.rs#L128), [link 2](https://github.com/meilisearch/meilisearch/blob/c85146524b960cf445a08e6510f33bcd1d8b0a5e/crates/milli/src/search/new/resolve_query_graph.rs#L187)), which is very time-consuming during indexing and takes a lot of disk space. I might be completely wrong, but that's what I understood from looking at the code.
 
-To be fair my version index everything, so I didn't change a single configuration on Meilisearch about [`stop words`](https://www.meilisearch.com/docs/reference/api/settings#stop-words), but I changed the [pagination `maxTotalHits`](https://www.meilisearch.com/docs/reference/api/settings#pagination) to 3.5 million (since there is 3.2 million documents).
+To be fair, my version indexes everything, so I didn't change a single configuration on Meilisearch about [`stop words`](https://www.meilisearch.com/docs/reference/api/settings#stop-words), but I changed the [pagination `maxTotalHits`](https://www.meilisearch.com/docs/reference/api/settings#pagination) to 3.5 million (since there are 3.2 million documents).
 
 Here are some stats about the Meilisearch index:
 
@@ -2802,24 +2798,23 @@ Here are some stats about the Meilisearch index:
 
 I have a single index with the contents leading to a total size of almost 300GB (15x write amplification, since the original corpus is 20GB).
 
-Looking at the size of the database responsible for saving data about phrase search we a whopping **864 million** etries in it.
+Looking at the size of the database responsible for saving data about phrase search, we have a whopping **864 million** entries in it.
 
 ![](/assets/2025-01-13-using-the-most-unhinged-avx-512-instruction-to-make-the-fastest-phrase-search-algo/meilisearch-mdb-stat.png)
 
 # Results
-So how this is going to work: I have a list of 53 different queries with different bottleneck. I will run the naive and simd versions and also I'm going to index the same data on Meilisearch and search the same queries and compare all of them. In the end I'm going to group the queries in tables representing their bottlenecks.
+So how is this going to work: I have a list of 53 different queries with different bottlenecks. I will run the naive and SIMD versions and also index the same data on Meilisearch, search the same queries, and compare all of them. In the end, I will group the queries in tables representing their bottlenecks.
 
 You can hover over queries that are collapsed with ellipsis to see the whole content.
 
-**Note:** Just as a disclaimer because this can be confusing. The normalization and tokenization of the text is done with the [unicode-segmentation crate](https://crates.io/crates/unicode-segmentation) and the way it deals with ponctuation is a bit weird. Tokenizing `"google.com"` will result in `["google.com"]`, which is the inverse of what you would expect which is `["google", ".", "com"]`, but tokenizing `"google. com"` will result in `["google", ".", "com"]`. So the case where `https://google` found 0 results and `https://google.com` found in 14 is right.
+**Note:** Just as a disclaimer because this can be confusing. The normalization and tokenization of the text are done with the [unicode-segmentation crate](https://crates.io/crates/unicode-segmentation), and the way it deals with punctuation is a bit weird. Tokenizing `"google.com"` will result in `["google.com"]`, which is the inverse of what you would expect, which is `["google", ".", "com"]`, but tokenizing `"google. com"` will result in `["google", ".", "com"]`. So the case where `https://google` found 0 results and `https://google.com` found 14 is correct.
 
-**Note:** You might notice that Meilisearch returns more results and there is a few reason for it.
-* The way it deals with ponctuation is different. On my version a ponctuation is like any other token, but for meilisearch it become a space.
-* It also returns documents with subqueries of the searched query, for example the query `may have significant health effects`, returns 3 documents containing this sequence (just like mine), but also returns one aditional document containing `may have significant immunomodulatory effects`.
+**Note:** You might notice that Meilisearch returns more results, and there are a few reasons for it:
+* The way it deals with punctuation is different. In my version, punctuation is like any other token, but for Meilisearch, it becomes a space.
+* It also returns documents with subqueries of the searched query. For example, the query `may have significant health effects` returns 3 documents containing this sequence (just like mine), but also returns one additional document containing `may have significant immunomodulatory effects`.
 
 ## Simd/Naive Intersection
-This are queries mainly bottleneck on computing the intersection using the simd or naive algos. Here is where we are going to see the performance differance between them.
-
+These are queries mainly bottlenecked by computing the intersection using the SIMD or naive algorithms. Here is where we are going to see the performance difference between them.
 
 {% highlight_lowest_value_in_row %}
 Query | Simd | Naive | Meilisearch | Meilisearch (Original) | Results | Results (Meilisearch) | Performance gain
@@ -2857,7 +2852,7 @@ phrase search | 0.2445 | 1.3501 | 1.6172 | 2.0215 | 9 | 19 | 6.6143x
 {% endhighlight_lowest_value_in_row %}
 
 ## Simd/Naive + Gallop
-Queries where they are equally bounded by computing the simd/naive intersection and computing the gallop intersection.
+Queries where they are equally bounded by computing the SIMD/naive intersection and computing the gallop intersection.
 
 {% highlight_lowest_value_in_row %}
 Query | Simd | Naive | Meilisearch | Meilisearch (Original) | Results | Results (Meilisearch) | Performance gain
@@ -2870,7 +2865,7 @@ is common in the | 2.5428 | 9.2461 | 6.5425 | 8.1781 | 1549 | 3876 | 2.5730x
 {% endhighlight_lowest_value_in_row %}
 
 ## Gallop Intersection
-This are queries where gallop intersection dominates, so the difference between naive and simd are very close (most of the difference is due to noise).
+These are queries where gallop intersection dominates, so the difference between naive and simd is very close (most of the difference is due to noise).
 
 {% highlight_lowest_value_in_row %}
 Query | Simd | Naive | Meilisearch | Meilisearch (Original) | Results | Results (Meilisearch) | Performance gain
@@ -2884,7 +2879,7 @@ https://google.com | 0.0086 | 0.0086 | 2.7748 | 3.4684 | 14 | 18 | 322.6512x
 {% endhighlight_lowest_value_in_row %}
 
 ## Merge and Minimize
-Very long queries where computing the merge and minimize phase dominates. Since they are so long we will probably find a very specific token making the intersection almost free making the difference between naive and simd almost non existant (most of the difference is due to noise).
+Very long queries where computing the merge and minimize phase dominates. Since they are so long, we will probably find a very specific token, making the intersection almost free, resulting in the difference between naive and SIMD being almost nonexistent (most of the difference is due to noise).
 
 {% highlight_lowest_value_in_row %}
 Query | Simd | Naive | Meilisearch | Meilisearch (Original) | Results | Results (Meilisearch) | Performance gain
@@ -2895,7 +2890,7 @@ Science & Mathematics PhysicsThe hot glowing surfaces of stars emit energy in th
 {% endhighlight_lowest_value_in_row %}
 
 ## Single Token
-Queries where during the merge and minimize got combined into a single one, in here we mainly bottleneck on getting the document ids out of the Roaringish Packed, since we don't even compute an intersection the difference between naive and simd are very close (most of the difference is due to noise).
+Queries where during the merge and minimize phases got combined into a single one. Here, we mainly bottleneck on getting the document IDs out of the Roaringish Packed. Since we don't even compute an intersection, the difference between naive and SIMD is very close (most of the difference is due to noise).
 
 {% highlight_lowest_value_in_row %}
 Query | Simd | Naive | Meilisearch | Meilisearch (Original) | Results | Results (Meilisearch) | Performance gain
