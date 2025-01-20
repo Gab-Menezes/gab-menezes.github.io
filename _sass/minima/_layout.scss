@@ -197,11 +197,6 @@ $top-line-height: $base-line-height * $base-font-size * 2.25;
   }
 }
 
-.highlight-lowest {
-  background-color: rgb(102, 179, 122);
-  color: white;
-}
-
 /**
  * Toc
  */
@@ -255,7 +250,8 @@ a.toc-link {
 
   left: 60px;                    /* Distance from the left side of the page */
   width: $content-width * 0.35;   /* Set the width of the TOC */
-  padding: 10px;                  /* Padding inside the TOC */
+  padding: 5px;                  /* Padding inside the TOC */
+  padding-left: 20px;                  /* Padding inside the TOC */
 
   z-index: 1000;                  /* Ensure the TOC appears above other content */
   overflow-y: auto;               /* Allow scrolling if TOC content is too long */

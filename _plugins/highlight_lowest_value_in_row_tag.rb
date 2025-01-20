@@ -26,7 +26,9 @@ module Jekyll
                     value = Float(cell.match(/<td.*?>(.*?)<\/td>/)[1]) rescue Float::MAX
 
                     # If this cell is the minimum value, highlight it
-                    if value == min_value
+                    if idx == 0
+                        cell.sub('<td', '<td class="query"')
+                    elsif value == min_value
                         cell.sub('<td', '<td class="highlight-lowest"')
                     else
                         cell

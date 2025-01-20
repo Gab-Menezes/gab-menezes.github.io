@@ -250,6 +250,15 @@ pre {
 /**
  * Tables
  */
+.highlight-lowest {
+  background-color: rgb(102, 179, 122);
+  color: white;
+}
+.query {
+  max-width: 250px;
+  min-width: 250px;
+}
+
 table {
   margin-bottom: $spacing-unit;
   width: 100%;
@@ -271,6 +280,14 @@ table {
   }
   td {
     border: 1px solid $table-border-color;
+    white-space: nowrap;          /* Prevents wrapping of the text */
+    overflow: hidden;             /* Hides overflow content */
+    text-overflow: ellipsis;      /* Adds "..." when content overflows */
+    max-width: 250px;             /* Sets a max-width for the cell */
+  }
+
+  td:hover {
+    white-space: normal;          /* Allow wrapping inside the tooltip */
   }
 
   @include media-query($on-laptop) {
