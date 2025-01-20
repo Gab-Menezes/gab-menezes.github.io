@@ -763,7 +763,7 @@ So remember a few paragraphs above where I said that the third database saves th
 
 For the special souce of this blog post (we will get there in the future, bear with me) I need that the continous block that represents the Roaringish Packed to be aligned to a 64 byte boundary, but you can't enforce this with LMDB and consequently heed. I really tried, but when you insert things into the DB f* the alignment of the rest of the values, so it doesn't work trying to insert things already aligned.
 
-Fixing this isn't hard if we add an additional big file that has all of the Roaringish Packed aligned to 64 byte boundary. So in the LMDB it self we only store a offset and length. But how we align the data ?
+Fixing this isn't hard if we add an additional big file that has all of the Roaringish Packed aligned to 64 byte boundary. So in the LMDB we only store an offset and length. But how we align the data ?
 
 This file will be [mmaped](https://man7.org/linux/man-pages/man2/mmap.2.html), so it's guarantee to be page aligned (4k), with this we know the alignment of the base of the file when constructing it, so we just pad some bytes before the begining of the next Roaringish Packed if needed.
 
