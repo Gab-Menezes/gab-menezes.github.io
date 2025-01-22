@@ -45,7 +45,7 @@ There is one big difference between these two: searching by keywords is relative
 So this makes phrase search way more computationally expensive. The conventional algorithm found in books is very slow, let's take a look at this first and compare it with Doug's brilliant idea.
 
 ## How the conventional algorithm works
-![](/assets/2025-01-13-using-the-most-unhinged-avx-512-instruction-to-make-the-fastest-phrase-search-algo/conventional-phrase-search-algo.png)
+![](/assets/2025-01-13-using-the-most-unhinged-avx-512-instruction-to-make-the-fastest-phrase-search-algo/convetional-phrase-search-algo.png)
 
 This algorithm (taken from Information Retrieval: Implementing and Evaluating Search Engines) analyzes one document at a time, so the `nextPhrase` function needs to be called for each document in the intersection of document IDs in the index.
 
