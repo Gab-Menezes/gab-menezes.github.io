@@ -2818,6 +2818,16 @@ You can hover over queries that are collapsed with ellipsis to see the whole con
 * The way it deals with punctuation is different. In my version, punctuation is like any other token, but for Meilisearch, it becomes a space.
 * It also returns documents with subqueries of the searched query. For example, the query `may have significant health effects` returns 3 documents containing this sequence (just like mine), but also returns one additional document containing `may have significant immunomodulatory effects`.
 
+**Note:** I think I found a bug in the Meilisearch implementation where it doesn't properly scape phrases containing quotes in it. So if you notice phrases like `"help"` or `"Science News from...` have way more results returned by Meilisearch than expected. I don't think I have made a mistake, for example here is the payload I sent when searching by `"help"`.
+```json
+{
+    "q":"\"\\\"help\\\"\"",
+    "hitsPerPage":10
+}
+```
+
+As you can see I have prorperly scaped the quotes inside the phrase it self, so take with a grain of salt the results for this queries. Even though the phrase search algorithm is faster than their default keyword search.
+
 **All times are measured in ms**.
 
 ## Simd/Naive Intersection
