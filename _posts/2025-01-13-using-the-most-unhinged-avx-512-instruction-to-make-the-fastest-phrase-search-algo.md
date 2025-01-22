@@ -2818,6 +2818,8 @@ You can hover over queries that are collapsed with ellipsis to see the whole con
 * The way it deals with punctuation is different. In my version, punctuation is like any other token, but for Meilisearch, it becomes a space.
 * It also returns documents with subqueries of the searched query. For example, the query `may have significant health effects` returns 3 documents containing this sequence (just like mine), but also returns one additional document containing `may have significant immunomodulatory effects`.
 
+**All times are measured in ms**.
+
 ## Simd/Naive Intersection
 These are queries mainly bottlenecked by computing the intersection using the SIMD or naive algorithms. Here is where we are going to see the performance difference between them.
 
