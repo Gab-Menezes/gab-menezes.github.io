@@ -5,6 +5,7 @@ title: "Using the most unhinged AVX-512 instruction to make the fastest phrase s
 
 # Disclaimers before we start
 * For those who don't want to read/don't care that much, here are the [results](#results). I hope after seeing them you are compelled to read. **TL;DR:** I wrote a super fast phrase search algorithm using AVX-512 and achieved wins up to 1600x the performance of Meilisearch.
+* The source code can be found [here](https://github.com/Gab-Menezes/phrase_search);
 * The contents of this blog post are inspired by the wonderful idea of [Doug Turnbull](https://softwaredoug.com/) from the series of blog posts about [Roaringish](https://softwaredoug.com/blog/2024/01/21/search-array-phrase-algorithm). Here we will take these ideas to an extreme, from smart algorithms to raw performance optimization.
 * I highly recommend reading the [Roaringish](https://softwaredoug.com/blog/2024/01/21/search-array-phrase-algorithm) blog post, but if you don't want to, there will be a recap on how it works.
 * This project has been almost 7 months in the making, with thousands and thousands of lines of code written and rewritten, so bear with me if I sound crazy. At the moment of writing, there are almost 2.7k LOC, but I have committed around 17k LOC (let's take a few thousand because of `.lock` files) (probably at the time of publishing this number has increased), so the project has been rewritten almost 6 times.
@@ -2802,7 +2803,7 @@ Looking at the size of the database responsible for saving data about phrase sea
 
 ![](/assets/2025-01-13-using-the-most-unhinged-avx-512-instruction-to-make-the-fastest-phrase-search-algo/meilisearch-mdb-stat.png)
 
-When compared to my version the index size is only 53GB (of course Meilisearch index needs to be bigger, because it's doing a lot more).
+When compared to my version the index size is only 74GB (of course Meilisearch index needs to be bigger, because it's doing a lot more).
 
 ![](/assets/2025-01-13-using-the-most-unhinged-avx-512-instruction-to-make-the-fastest-phrase-search-algo/index-size.png)
 
