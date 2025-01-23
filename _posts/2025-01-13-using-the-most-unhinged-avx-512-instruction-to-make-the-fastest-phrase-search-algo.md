@@ -52,10 +52,10 @@ This algorithm (taken from Information Retrieval: Implementing and Evaluating Se
 Description (also taken from the book): Locates the first occurrence of a phrase after a given position. The function calls the `next(t, i)` method which returns the next position `t` after the position `i`. Similar to `prev(t, i)`.
 
 You don't need to understand this algorithm, just that it is inefficient because of a lot of reasons:
-    * Intersection is expensive
-    * Analyzes one document at a time
-    * Not cache friendly, we are jumping around with the `next` and `prev` functions
-    * Recursive
+* Intersection is expensive
+* Analyzes one document at a time
+* Not cache friendly, we are jumping around with the `next` and `prev` functions
+* Recursive
 
 For a small collection of documents, this works fine, but imagine for large collections of 1M+ documents this will blow up quickly (hundreds of milliseconds, maybe even seconds per query), which is unacceptable for a real-time search engine, so not good at all.
 
