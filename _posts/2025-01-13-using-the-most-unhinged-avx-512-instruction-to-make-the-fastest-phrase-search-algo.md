@@ -142,13 +142,13 @@ Now to find if the left token is followed by the right token we can:
 For example, let's assume the term "little" has the following positions.
 ```
 Group 0                              ...    | Group 21
-0000000000000000 0000000000100010    ...    | 0001000000100101 0000000000010100
+0000000000000000 0000000000100010    ...    | 0000000000010101 0000000000010100
 ```
 
 And "lamb".
 ```
 Group 1                              ...    | Group 21
-0000000000000000 0000000000100010    ...    | 0000000000010101 0000000001001000
+0000000000000001 0000000000100010    ...    | 0000000000010101 0000000001001000
 ```
 
 The group 21 is in the intersection, so:
